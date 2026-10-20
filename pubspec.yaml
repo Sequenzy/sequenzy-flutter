@@ -1,0 +1,21 @@
+name: sequenzy_flutter
+description: Sequenzy for Flutter apps. Identify contacts, track events, register push tokens and show in-app messages and content cards.
+version: 0.1.0
+homepage: https://sequenzy.com
+repository: https://github.com/Sequenzy/sequenzy-flutter
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+  shared_preferences: ^2.3.0
+  url_launcher: ^6.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
