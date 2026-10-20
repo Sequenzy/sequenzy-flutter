@@ -1,8 +1,10 @@
 # Sequenzy for Flutter
 
-Identify contacts, track events, register push tokens and show in-app
-messages and content cards from Flutter apps. Pure Dart. Full guide:
-[Mobile SDKs](https://docs.sequenzy.com/concepts/mobile-sdks).
+The official Flutter SDK for [Sequenzy](https://sequenzy.com), the email
+marketing platform for SaaS. Identify contacts, track events, register push tokens and show in-app
+messages and content cards from Flutter apps. Pure Dart. Events from your app start the same
+sequences as your emails, and push and in-app messages are steps in them.
+Full guide: [Mobile SDKs](https://docs.sequenzy.com/concepts/mobile-sdks).
 
 ## Install
 
@@ -47,6 +49,15 @@ flutter pub get && flutter analyze && flutter test
 cd example && flutter run
 ```
 
-Tests run against `../contract/fixtures`. Releases are published from Sequenzy's main repository with a `flutter-v<version>` tag
-(see `mobile-sdks/RELEASING.md` there); this folder is copied to
-`Sequenzy/sequenzy-flutter` on each release.
+Tests run against `../contract/fixtures`. This repository is updated from Sequenzy's SDK
+sources with every release.
+
+## Links
+
+- [Sequenzy](https://sequenzy.com): email marketing, push, SMS and in-app
+  messages for SaaS, with automated sequences and AI-written emails.
+- [Mobile SDK guide](https://docs.sequenzy.com/concepts/mobile-sdks)
+- [Push notifications](https://docs.sequenzy.com/concepts/push-notifications)
+  and [in-app messages](https://docs.sequenzy.com/concepts/in-app-messages)
+- [Pricing](https://sequenzy.com/pricing)
+- Other Sequenzy SDKs: [iOS](https://github.com/Sequenzy/sequenzy-swift), [Android](https://github.com/Sequenzy/sequenzy-android), [React Native](https://github.com/Sequenzy/sequenzy-react-native)
