@@ -42,6 +42,21 @@ final cards = InAppCardsController();          // inbox: cards, refresh(), markR
 InAppCardView(card: card, onDismiss: cards.dismiss);
 ```
 
+iOS Live Activities need Swift for the widget and ActivityKit. Forward the
+tokens your Swift code or plugin receives so your backend can start, update and
+end activities through Sequenzy:
+
+```dart
+await Sequenzy.registerLiveActivityToken(
+    LiveActivityToken.pushToStart(activityType: 'DeliveryAttributes', token: token));
+await Sequenzy.registerLiveActivityToken(LiveActivityToken.update(
+    activityType: 'DeliveryAttributes', activityId: 'order-1234', token: token));
+await Sequenzy.liveActivityEnded(token);       // when the activity ends or is dismissed
+```
+
+On sign-out, end your running activities in native code before
+`Sequenzy.reset()`, so the next person never sees them.
+
 ## Develop
 
 ```bash

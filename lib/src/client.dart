@@ -8,7 +8,7 @@ import 'package:http/http.dart' as http;
 import 'models.dart';
 import 'storage.dart';
 
-const sequenzySdkVersion = '0.1.0';
+const sequenzySdkVersion = '0.1.1';
 const defaultApiBaseUrl = 'https://api.sequenzy.com';
 
 enum SequenzyLogLevel { none, error, info, debug }
@@ -179,6 +179,10 @@ class SequenzyClient {
   String? _identityToken;
   String? _pushToken;
   Map<String, Object?>? _pushRegistration;
+  List<LiveActivityToken> _liveActivityTokens = [];
+
+  /// Stored ActivityKit tokens; the newest are kept.
+  static const maxLiveActivityTokens = 32;
 
   /// Profile changes not yet accepted by the server, merged.
   Map<String, Object?>? _pendingProfile;
@@ -216,6 +220,17 @@ class SequenzyClient {
     _pushToken = await _store.getString('pushToken');
     _pushRegistration = _decodeObject(await _store.getString('pushRegistration'));
     _pendingProfile = _decodeObject(await _store.getString('profile'));
+    final liveTokens = await _store.getString('liveActivityTokens');
+    if (liveTokens != null) {
+      try {
+        final decoded = jsonDecode(liveTokens);
+        if (decoded is List) {
+          _liveActivityTokens = decoded.map(LiveActivityToken.fromJson).whereType<LiveActivityToken>().toList();
+        }
+      } catch (_) {
+        _liveActivityTokens = [];
+      }
+    }
     final raw = await _store.getString('events');
     if (raw != null) {
       try {
@@ -278,6 +293,19 @@ class SequenzyClient {
         _identityBlocked = false;
         _providerRetryAt = null;
         await _registerPush(force: previous != normalized);
+        if (previous != normalized) {
+          if (previous != null) {
+            // Another user signed in without reset: the previous user's
+            // running activities stay theirs, and only the device's
+            // push-to-start tokens move to the new contact.
+            _liveActivityTokens = _liveActivityTokens.where((token) => token.kind == 'push_to_start').toList();
+            await _persistLiveActivityTokens();
+          }
+          // Stored ActivityKit tokens link to the contact.
+          for (final token in _liveActivityTokens) {
+            await _sendLiveActivityToken(token);
+          }
+        }
         await _flush();
       });
 
@@ -299,6 +327,14 @@ class SequenzyClient {
             _log(SequenzyLogLevel.error, 'Could not unregister the push token: $error');
           }
         }
+        final liveTokens = _liveActivityTokens;
+        for (final liveToken in liveTokens) {
+          await _removeLiveActivityToken(liveToken.token, unlinkSubscriber: true);
+        }
+        // A running activity belongs to the previous user; push-to-start
+        // tokens belong to the device and are registered again below.
+        _liveActivityTokens = liveTokens.where((liveToken) => liveToken.kind == 'push_to_start').toList();
+        await _persistLiveActivityTokens();
         _email = null;
         _identityToken = null;
         _pushRegistration = null;
@@ -316,6 +352,9 @@ class SequenzyClient {
         _backoff = Duration.zero;
         _nextAttemptAt = null;
         _identityBlocked = false;
+        for (final liveToken in _liveActivityTokens) {
+          await _sendLiveActivityToken(liveToken);
+        }
       });
 
   // endregion
@@ -661,6 +700,92 @@ class SequenzyClient {
     if (response.body?['pushConfigured'] == false) {
       _log(SequenzyLogLevel.info,
           'Device registered, but ${config.platform} push credentials are not set up in Sequenzy yet');
+    }
+  }
+
+  /// Registers an ActivityKit push token your native Live Activity code
+  /// received (iOS only): `Activity<T>.pushToStartTokenUpdates` as
+  /// [LiveActivityToken.pushToStart], or a running activity's
+  /// `pushTokenUpdates` as [LiveActivityToken.update] with its
+  /// `sequenzy.activityId`. A newer token for the same type or activity
+  /// replaces the stored one.
+  Future<void> registerLiveActivityToken(LiveActivityToken token) => _run(() async {
+        if (config.platform != 'ios') {
+          _log(SequenzyLogLevel.error, 'Live Activities are only available on iOS');
+          return;
+        }
+        if (!token.isValid) {
+          _log(SequenzyLogLevel.error,
+              "Ignoring a Live Activity token: it needs a hex token, the Swift type name and, for update tokens, the activity's sequenzy.activityId");
+          return;
+        }
+        final kept = [..._liveActivityTokens.where((stored) => !token.replaces(stored)), token];
+        _liveActivityTokens =
+            kept.length > maxLiveActivityTokens ? kept.sublist(kept.length - maxLiveActivityTokens) : kept;
+        await _persistLiveActivityTokens();
+        await _sendLiveActivityToken(token);
+      });
+
+  /// Reports that an activity ended or was dismissed, so Sequenzy stops sending to it.
+  Future<void> liveActivityEnded(String rawToken) => _run(() async {
+        final token = rawToken.trim().toLowerCase();
+        if (!_liveActivityTokens.any((stored) => stored.token == token)) return;
+        _liveActivityTokens = _liveActivityTokens.where((stored) => stored.token != token).toList();
+        await _persistLiveActivityTokens();
+        await _removeLiveActivityToken(token, unlinkSubscriber: false);
+      });
+
+  Future<List<LiveActivityToken>> liveActivityTokens() => _run(() async => List.of(_liveActivityTokens));
+
+  Future<void> _persistLiveActivityTokens() => _store.setString(
+      'liveActivityTokens',
+      _liveActivityTokens.isEmpty ? null : jsonEncode(_liveActivityTokens.map((token) => token.toJson()).toList()));
+
+  Future<void> _sendLiveActivityToken(LiveActivityToken token) async {
+    const path = '/api/v1/push/live-activities';
+    final base = <String, Object?>{
+      'companyId': config.companyId,
+      'publicKey': config.publicKey,
+      ...token.toJson(),
+      'anonymousId': await _ensureAnonymousId(),
+      // Links the token to this installation's push device, when there is one.
+      if (_pushToken != null) 'deviceToken': _pushToken,
+      if (config.appVersion?.isNotEmpty == true) 'appVersion': config.appVersion,
+      if (config.osVersion?.isNotEmpty == true) 'osVersion': config.osVersion,
+    };
+    _Response? response;
+    if (_email != null) {
+      final result = await _withIdentity(
+          (email, identityToken) => _post(path, {...base, 'email': email, 'identityToken': identityToken}));
+      switch (result) {
+        case _IdentifiedResponse(response: final identified):
+          response = identified;
+        case _Failed(:final error):
+          _log(SequenzyLogLevel.info, 'Live Activity token registration failed: $error');
+          return;
+        case _NotIdentified() || _Rejected():
+          // Store it anonymously; Sequenzy can address it once the next
+          // identify links it to the contact.
+          response = await _tryPost(path, base);
+      }
+    } else {
+      response = await _tryPost(path, base);
+    }
+    if (response != null && !response.ok) {
+      _log(SequenzyLogLevel.error,
+          'Live Activity token registration failed: HTTP ${response.status} ${_error(response)}');
+    }
+  }
+
+  Future<void> _removeLiveActivityToken(String token, {required bool unlinkSubscriber}) async {
+    final response = await _tryPost('/api/v1/push/live-activities/remove', {
+      'companyId': config.companyId,
+      'publicKey': config.publicKey,
+      'token': token,
+      if (unlinkSubscriber) 'unlinkSubscriber': true,
+    });
+    if (response != null && !response.ok) {
+      _log(SequenzyLogLevel.error, 'Could not report the Live Activity ended (HTTP ${response.status})');
     }
   }
 

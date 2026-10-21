@@ -1,6 +1,9 @@
 ## 0.1.1
 
-- README: links to Sequenzy, the guides and the other SDKs. No code changes.
+- iOS Live Activities: `Sequenzy.registerLiveActivityToken` and
+  `Sequenzy.liveActivityEnded` pass ActivityKit tokens from your native code,
+  so your backend can start, update and end activities through Sequenzy.
+- README: links to Sequenzy, the guides and the other SDKs.
 
 ## 0.1.0
 

@@ -96,6 +96,15 @@ class Sequenzy {
   /// Android, `getAPNSToken()` on iOS) and `onTokenRefresh`.
   static Future<void> setPushToken(String token) => _require().setPushToken(token);
 
+  /// iOS Live Activities: pass the ActivityKit tokens your Swift code (or a
+  /// plugin such as live_activities) receives, so your backend can start,
+  /// update and end activities through Sequenzy.
+  static Future<void> registerLiveActivityToken(LiveActivityToken token) =>
+      _require().registerLiveActivityToken(token);
+
+  /// Call when an activity ends or is dismissed, with its update token.
+  static Future<void> liveActivityEnded(String token) => _require().liveActivityEnded(token);
+
   /// Call when the user opens a notification (`FirebaseMessaging.onMessageOpenedApp`,
   /// `getInitialMessage`) with `message.data`. Reports the click and opens the push URL.
   /// Returns false for other senders.

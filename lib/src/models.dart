@@ -430,3 +430,87 @@ class SubscribeResult {
   final String? error;
   final bool retryable;
 }
+
+/// An ActivityKit push token from your app's native Live Activity code (iOS).
+///
+/// `pushToStart` tokens (iOS 17.2+, one per ActivityAttributes type) let your
+/// backend start activities; `update` tokens (one per running activity, with
+/// the activity's `sequenzy.activityId`) let it update and end them.
+class LiveActivityToken {
+  LiveActivityToken.pushToStart({required String activityType, required String token})
+      : kind = 'push_to_start',
+        activityType = activityType.trim(),
+        activityId = null,
+        token = token.trim().toLowerCase();
+
+  LiveActivityToken.update({required String activityType, required String activityId, required String token})
+      : kind = 'update',
+        activityType = activityType.trim(),
+        activityId = activityId.trim(),
+        token = token.trim().toLowerCase();
+
+  /// `push_to_start` or `update`.
+  final String kind;
+
+  /// The Swift ActivityAttributes type name, e.g. `DeliveryAttributes`.
+  final String activityType;
+  final String? activityId;
+
+  /// The token data as lowercase hex.
+  final String token;
+
+  static final _token = RegExp(r'^[0-9a-f]{64,200}$');
+  static final _type = RegExp(r'^[A-Za-z_][A-Za-z0-9_]{0,127}$');
+  static final _id = RegExp(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$');
+
+  bool get isValid =>
+      _token.hasMatch(token) &&
+      _type.hasMatch(activityType) &&
+      (kind == 'push_to_start' || (activityId != null && _id.hasMatch(activityId!)));
+
+  /// A newer token for the same type (push-to-start) or activity replaces it.
+  bool replaces(LiveActivityToken other) =>
+      token == other.token ||
+      (kind == other.kind &&
+          activityType == other.activityType &&
+          (kind == 'push_to_start' || activityId == other.activityId));
+
+  Map<String, Object?> toJson() => {
+        'kind': kind,
+        'activityType': activityType,
+        if (activityId != null) 'activityId': activityId,
+        'token': token,
+      };
+
+  static LiveActivityToken? fromJson(Object? json) {
+    if (json is! Map) return null;
+    final kind = json['kind'];
+    final activityType = json['activityType'];
+    final token = json['token'];
+    if (activityType is! String || token is! String) return null;
+    final LiveActivityToken parsed;
+    if (kind == 'push_to_start') {
+      parsed = LiveActivityToken.pushToStart(activityType: activityType, token: token);
+    } else if (kind == 'update' && json['activityId'] is String) {
+      parsed = LiveActivityToken.update(
+          activityType: activityType, activityId: json['activityId'] as String, token: token);
+    } else {
+      return null;
+    }
+    return parsed.isValid ? parsed : null;
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is LiveActivityToken &&
+      other.kind == kind &&
+      other.activityType == activityType &&
+      other.activityId == activityId &&
+      other.token == token;
+
+  @override
+  int get hashCode => Object.hash(kind, activityType, activityId, token);
+
+  @override
+  String toString() => 'LiveActivityToken($kind, $activityType, $activityId)';
+}
