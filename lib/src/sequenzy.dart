@@ -124,11 +124,17 @@ class Sequenzy {
     return true;
   }
 
-  static Future<List<InAppMessage>> fetchMessages() => _require().fetchFeed(kind: 'message');
+  /// Open in-app messages, for apps that present them themselves. Custom HTML
+  /// messages are included only with [includeHtml].
+  static Future<List<InAppMessage>> fetchMessages({bool includeHtml = false}) => _require().fetchFeed(
+        kind: 'message',
+        formats: includeHtml ? const ['modal', 'banner', 'fullscreen', 'html'] : null,
+      );
 
   static Future<List<InAppMessage>> fetchCards({int? limit}) => _require().fetchFeed(kind: 'card', limit: limit);
 
-  static Future<bool> report(InAppEventType type, InAppMessage message) => _require().report(type, message.id);
+  static Future<bool> report(InAppEventType type, InAppMessage message, {String? buttonId}) =>
+      _require().report(type, message.id, buttonId: buttonId);
 
   /// Reports the click and opens the button's URL; dismiss buttons report a dismissal.
   static Future<void> handleButtonPress(InAppButton button, InAppMessage message) async {

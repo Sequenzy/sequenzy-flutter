@@ -158,6 +158,20 @@ void main() {
     expect(find.byKey(const Key('sequenzy-card-iam_card')), findsNothing);
   });
 
+  testWidgets("takes down the previous contact's messages after identify as someone else", (tester) async {
+    await pumpHost(tester);
+    expect(find.byKey(const Key('sequenzy-modal')), findsOneWidget);
+    feedMessages = [];
+    await tester.runAsync(() async {
+      await Sequenzy.identify('bob@example.com', identityToken: 'seq_wid_bob');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump();
+    expect(find.byKey(const Key('sequenzy-modal')), findsNothing);
+    expect(find.byKey(const Key('sequenzy-banner')), findsNothing);
+    expect(reports('dismissed'), isEmpty);
+  });
+
   testWidgets('reports the click and opens the button URL', (tester) async {
     await pumpHost(tester);
     await tester.tap(find.text('Upgrade'));

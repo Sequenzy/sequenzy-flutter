@@ -3,9 +3,11 @@
 library;
 
 export 'src/client.dart';
+export 'src/in_app_html.dart';
 export 'src/models.dart';
 export 'src/sequenzy.dart';
 export 'src/storage.dart';
 export 'src/widgets/in_app_card.dart';
 export 'src/widgets/in_app_host.dart';
+export 'src/widgets/in_app_html_view.dart';
 export 'src/widgets/in_app_message_view.dart';

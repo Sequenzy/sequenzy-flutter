@@ -57,6 +57,14 @@ await Sequenzy.liveActivityEnded(token);       // when the activity ends or is d
 On sign-out, end your running activities in native code before
 `Sequenzy.reset()`, so the next person never sees them.
 
+## Custom HTML messages
+
+[Custom HTML in-app messages](https://docs.sequenzy.com/concepts/in-app-html-messages) (surveys, Braze-style custom HTML) show
+automatically through `webview_flutter`. Their JavaScript bridge closes the
+message, opens links through `onOpenUrl`, and logs events and attributes for
+the identified contact. Pass `showHtmlMessages: false` to `SequenzyInAppHost`
+to leave them in the feed.
+
 ## Develop
 
 ```bash

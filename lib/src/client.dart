@@ -5,10 +5,11 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'in_app_html.dart';
 import 'models.dart';
 import 'storage.dart';
 
-const sequenzySdkVersion = '0.1.1';
+const sequenzySdkVersion = '0.1.2';
 const defaultApiBaseUrl = 'https://api.sequenzy.com';
 
 enum SequenzyLogLevel { none, error, info, debug }
@@ -815,7 +816,9 @@ class SequenzyClient {
   // region In-app
 
   /// Open messages (`kind: 'message'`) or cards (`kind: 'card'`), in server order.
-  Future<List<InAppMessage>> fetchFeed({String? kind, int? limit}) => _run(() async {
+  /// [formats] lists the message formats the caller renders; null means the
+  /// native formats, so `html` messages arrive only when listed.
+  Future<List<InAppMessage>> fetchFeed({String? kind, int? limit, List<String>? formats}) => _run(() async {
         final result = await _withIdentity((email, token) => _post('/api/v1/in-app/feed', {
               'companyId': config.companyId,
               'publicKey': config.publicKey,
@@ -823,6 +826,7 @@ class SequenzyClient {
               'identityToken': token,
               if (kind != null) 'kind': kind,
               if (limit != null) 'limit': limit,
+              if (formats != null) 'formats': formats,
             }));
         switch (result) {
           case _NotIdentified():
@@ -843,7 +847,8 @@ class SequenzyClient {
       });
 
   /// Reports `displayed`, `clicked`, `dismissed` or `read` for a feed item.
-  Future<bool> report(InAppEventType type, String messageId) => _run(() async {
+  /// [buttonId] names the control clicked in a custom HTML message.
+  Future<bool> report(InAppEventType type, String messageId, {String? buttonId}) => _run(() async {
         final result = await _withIdentity((email, token) => _post('/api/v1/in-app/feed/events', {
               'companyId': config.companyId,
               'publicKey': config.publicKey,
@@ -851,6 +856,8 @@ class SequenzyClient {
               'identityToken': token,
               'messageId': messageId,
               'type': type.name,
+              if (buttonId != null && type == InAppEventType.clicked && InAppHtmlBridgeMessage.isValidButtonId(buttonId))
+                'buttonId': buttonId,
             }));
         final ok = result is _IdentifiedResponse && result.response.ok;
         if (!ok) _log(SequenzyLogLevel.error, 'Could not report in-app ${type.name} for $messageId');

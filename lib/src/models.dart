@@ -20,6 +20,8 @@ class InAppMessage {
     required this.displayedAt,
     required this.readAt,
     required this.dismissedAt,
+    this.html,
+    this.showCloseButton = false,
   });
 
   final String id;
@@ -27,7 +29,8 @@ class InAppMessage {
   /// `message` or `card`.
   final String kind;
 
-  /// `modal`, `banner` or `fullscreen`; null for cards.
+  /// `modal`, `banner`, `fullscreen` or `html` (a custom HTML message, shown
+  /// by [SequenzyInAppHost] in a WebView); null for cards.
   final String? format;
 
   /// Banners: `top` or `bottom`. Modals: `bottom` (a sheet) or `center`.
@@ -50,6 +53,12 @@ class InAppMessage {
   final String? displayedAt;
   final String? readAt;
   final String? dismissedAt;
+
+  /// `html` messages: the document to load, with the Sequenzy bridge in it.
+  final String? html;
+
+  /// `html` messages: draw a close button over the document.
+  final bool showCloseButton;
 
   bool get isCard => kind == 'card';
   String get resolvedFormat => format ?? 'modal';
@@ -75,6 +84,8 @@ class InAppMessage {
         displayedAt: displayedAt,
         readAt: readAt ?? this.readAt,
         dismissedAt: dismissedAt,
+        html: html,
+        showCloseButton: showCloseButton,
       );
 
   /// Parses one feed item, or returns null when it is malformed.
@@ -111,6 +122,8 @@ class InAppMessage {
       displayedAt: _string(json['displayedAt']),
       readAt: _string(json['readAt']),
       dismissedAt: _string(json['dismissedAt']),
+      html: _string(json['html']),
+      showCloseButton: json['showCloseButton'] == true,
     );
   }
 }

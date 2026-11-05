@@ -1,3 +1,15 @@
+## 0.1.2
+
+- Fixes and improvements.
+
+## Unreleased
+
+- Custom HTML in-app messages: `SequenzyInAppHost` shows `html` messages
+  (surveys, Braze-style custom HTML) in a WebView with the Sequenzy JS bridge;
+  `showHtmlMessages: false` turns them off. Adds a `webview_flutter`
+  dependency. `fetchMessages(includeHtml: true)`, `report(..., buttonId:)`.
+  `InAppMessage.format` can now be `html`.
+
 ## 0.1.1
 
 - iOS Live Activities: `Sequenzy.registerLiveActivityToken` and
