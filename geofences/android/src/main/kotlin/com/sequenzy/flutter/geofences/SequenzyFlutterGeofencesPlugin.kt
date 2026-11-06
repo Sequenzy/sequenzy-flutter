@@ -118,7 +118,11 @@ class SequenzyFlutterGeofencesPlugin :
 
     private fun ask(activity: Activity, permissions: Array<String>) {
         SequenzyGeofenceBridge.markPermissionAsked(context)
-        activity.requestPermissions(permissions, REQUEST_CODE)
+        // Runtime permissions start at Android 6; requestAuthorization answers
+        // directly below that, so this is only reached on 6 and later.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            activity.requestPermissions(permissions, REQUEST_CODE)
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray): Boolean {

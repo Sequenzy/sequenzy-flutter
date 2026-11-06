@@ -10,7 +10,7 @@ import 'in_app_html.dart';
 import 'models.dart';
 import 'storage.dart';
 
-const sequenzySdkVersion = '0.2.0';
+const sequenzySdkVersion = '0.2.1';
 const defaultApiBaseUrl = 'https://api.sequenzy.com';
 
 enum SequenzyLogLevel { none, error, info, debug }
