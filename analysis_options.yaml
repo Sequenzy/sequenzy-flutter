@@ -1,4 +1,6 @@
 analyzer:
   exclude:
     - build/**
+    # A separate package with its own analysis (sequenzy_flutter_geofences).
+    - geofences/**
 include: package:flutter_lints/flutter.yaml

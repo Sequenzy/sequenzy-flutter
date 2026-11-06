@@ -32,11 +32,18 @@ dependencies:
     sdk: flutter
   sequenzy_flutter:
     path: ..
+  sequenzy_flutter_geofences:
+    path: ../geofences
   http: ^1.2.0
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+
+# The geofence plugin depends on the published SDK; use the one here.
+dependency_overrides:
+  sequenzy_flutter:
+    path: ..
 
 dev_dependencies:
   flutter_test:

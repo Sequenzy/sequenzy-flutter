@@ -24,6 +24,15 @@ Sequenzy.configure(SequenzyConfig(
   appId: 'com.example.app',
   platform: Platform.isIOS ? 'ios' : 'android',
   identityTokenProvider: (email) => myBackend.sequenzyToken(email),
+  // Optional: lets Sequenzy see who allows notifications and show push
+  // primers (in-app messages that ask).
+  pushPermission: SequenzyPushPermission(
+    getStatus: () async => PushPermissionStatus.fromName(
+        (await FirebaseMessaging.instance.getNotificationSettings()).authorizationStatus.name),
+    request: () async => PushPermissionStatus.fromName(
+        (await FirebaseMessaging.instance.requestPermission()).authorizationStatus.name),
+    openSettings: () async => openAppSettings(), // Android, from permission_handler
+  ),
 ));
 
 MaterialApp(builder: (context, child) => SequenzyInAppHost(child: child!), home: ...);
@@ -56,6 +65,22 @@ await Sequenzy.liveActivityEnded(token);       // when the activity ends or is d
 
 On sign-out, end your running activities in native code before
 `Sequenzy.reset()`, so the next person never sees them.
+
+## Geofencing
+
+[`sequenzy_flutter_geofences`](./geofences) watches your
+[geofences](https://docs.sequenzy.com/concepts/geofences) natively on iOS and
+Android and reports visits of the signed-in contact, also while the app is not
+running:
+
+```dart
+await SequenzyGeofences.start();                // after Sequenzy.configure
+await SequenzyGeofences.requestAuthorization();
+await SequenzyGeofences.enable();
+```
+
+Apps that monitor regions themselves call `Sequenzy.fetchNearbyGeofences` and
+`Sequenzy.trackGeofenceTransition` instead.
 
 ## Custom HTML messages
 

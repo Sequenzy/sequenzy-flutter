@@ -1,0 +1,36 @@
+name: sequenzy_flutter_geofences
+description: Geofencing for the Sequenzy Flutter SDK. Report when signed-in users enter, leave or stay in your places, with native region monitoring on iOS and Android.
+version: 0.2.0
+homepage: https://sequenzy.com
+repository: https://github.com/Sequenzy/sequenzy-flutter/tree/main/geofences
+documentation: https://docs.sequenzy.com/concepts/geofences
+issue_tracker: https://github.com/Sequenzy/sequenzy-flutter/issues
+topics:
+  - geofencing
+  - location
+  - marketing
+  - push-notifications
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  sequenzy_flutter: ^0.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  http: ^1.2.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.sequenzy.flutter.geofences
+        pluginClass: SequenzyFlutterGeofencesPlugin
+      ios:
+        pluginClass: SequenzyFlutterGeofencesPlugin

@@ -1,0 +1,9 @@
+# Replaces .gitignore for `flutter pub publish`; keep both in step.
+.dart_tool/
+build/
+.packages
+pubspec.lock
+example/.dart_tool/
+example/build/
+# Published separately as sequenzy_flutter_geofences.
+geofences/

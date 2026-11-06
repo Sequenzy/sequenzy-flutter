@@ -51,7 +51,12 @@ void main() {
           final body = jsonDecode(request.body) as Map<String, dynamic>;
           calls.add(Call(request.url.path, body));
           if (request.url.path == '/api/v1/in-app/feed') {
-            final messages = feedMessages.where((message) => body['kind'] == null || message['kind'] == body['kind']);
+            // Like the API: push primers only for callers that list the action
+            final canAsk = (body['actions'] as List?)?.contains('request_push_permission') ?? false;
+            final messages = feedMessages.where((message) =>
+                (body['kind'] == null || message['kind'] == body['kind']) &&
+                (canAsk ||
+                    !(message['buttons'] as List).any((button) => button['action'] == 'request_push_permission')));
             return http.Response(jsonEncode({'success': true, 'messages': messages.toList()}), 200);
           }
           return http.Response('{"success":true}', 200);
@@ -139,6 +144,93 @@ void main() {
     final primaryBox =
         tester.widget<Container>(find.ancestor(of: find.text('Upgrade'), matching: find.byType(Container)).first);
     expect((primaryBox.decoration as BoxDecoration).color, const Color(0xFF4F46E5));
+  });
+
+  group('push primers', () {
+    Map<String, dynamic> primer() =>
+        (feed['messages'] as List).cast<Map<String, dynamic>>().firstWhere((message) => message['id'] == 'iam_primer');
+
+    void configureWithPermission(List<PushPermissionStatus> statuses, List<String> log) {
+      var status = statuses.first;
+      final permission = SequenzyPushPermission(
+        getStatus: () async => status,
+        request: () async {
+          log.add('request');
+          status = statuses.length > 1 ? statuses[1] : status;
+          return status;
+        },
+        openSettings: () async => log.add('settings'),
+      );
+      final config = SequenzyConfig(
+        publicKey: 'seq_pk_test',
+        companyId: 'company_1',
+        appId: 'com.example.app',
+        platform: 'ios',
+        logLevel: SequenzyLogLevel.none,
+        pushPermission: permission,
+      );
+      Sequenzy.unconfigure();
+      Sequenzy.configure(
+        config,
+        client: SequenzyClient(
+          config,
+          store: MemoryStore(),
+          httpClient: MockClient((request) async {
+            final body = jsonDecode(request.body) as Map<String, dynamic>;
+            calls.add(Call(request.url.path, body));
+            if (request.url.path == '/api/v1/in-app/feed') {
+              return http.Response(jsonEncode({'success': true, 'messages': feedMessages}), 200);
+            }
+            return http.Response('{"success":true}', 200);
+          }),
+        ),
+      );
+      Sequenzy.urlOpener = (url) async => opened.add(url);
+    }
+
+    testWidgets('never shows a primer to an app that cannot ask for permission', (tester) async {
+      feedMessages = [primer()];
+      await pumpHost(tester);
+      expect(find.text('Turn on notifications'), findsNothing);
+      expect(calls.firstWhere((call) => call.path == '/api/v1/in-app/feed').body.containsKey('actions'), isFalse);
+    });
+
+    testWidgets('asks for permission from the primer and reports the result with the click', (tester) async {
+      final log = <String>[];
+      configureWithPermission([PushPermissionStatus.notDetermined, PushPermissionStatus.granted], log);
+      feedMessages = [primer()];
+      await pumpHost(tester);
+      expect(calls.firstWhere((call) => call.path == '/api/v1/in-app/feed').body['actions'],
+          ['request_push_permission']);
+      // The permission button is the filled primary one
+      final primaryBox = tester.widget<Container>(
+          find.ancestor(of: find.text('Turn on notifications'), matching: find.byType(Container)).first);
+      expect((primaryBox.decoration as BoxDecoration).color, const Color(0xFF4F46E5));
+
+      await tester.tap(find.text('Turn on notifications'));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await tester.pumpAndSettle();
+      expect(log, ['request']);
+      expect(opened, isEmpty);
+      final click = calls.firstWhere(
+          (call) => call.path == '/api/v1/in-app/feed/events' && call.body['type'] == 'clicked');
+      expect(click.body['messageId'], 'iam_primer');
+      expect(click.body['pushPermission'], 'granted');
+      expect(find.text('Turn on notifications'), findsNothing);
+    });
+
+    testWidgets('opens notification settings when the contact turned them off', (tester) async {
+      final log = <String>[];
+      configureWithPermission([PushPermissionStatus.denied], log);
+      await tester.runAsync(() async {
+        await Sequenzy.identify('jane@example.com', identityToken: 'seq_wid_test');
+        final message = InAppMessage.fromJson(primer())!;
+        await Sequenzy.handleButtonPress(message.buttons.first, message);
+      });
+      expect(log, ['request', 'settings']);
+      final click = calls.firstWhere((call) => call.path == '/api/v1/in-app/feed/events');
+      expect(click.body['pushPermission'], 'denied');
+    });
   });
 
   testWidgets('shows messages one at a time and reports displayed and dismissed', (tester) async {

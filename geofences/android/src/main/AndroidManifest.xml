@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shared by sequenzy_flutter_geofences and @sequenzy/react-native-geofences;
+     generated from mobile-sdks/geofence-bridge by sync.sh. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Geofence transitions arrive while the app is in the background. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- Geofences are cleared on reboot and app updates; re-register them. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application>
+        <receiver
+            android:name="com.sequenzy.geofences.bridge.SequenzyGeofenceReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name="com.sequenzy.geofences.bridge.SequenzyGeofenceRestoreReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

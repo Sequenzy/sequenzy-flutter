@@ -215,7 +215,7 @@ class InAppButtonStack extends StatelessWidget {
                   secondary.label,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: type.button(secondary.opensUrl ? palette.secondaryLink : palette.secondaryDismiss),
+                  style: type.button(secondary.acts ? palette.secondaryLink : palette.secondaryDismiss),
                 ),
               ),
             ),

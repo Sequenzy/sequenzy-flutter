@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'client.dart';
+import 'geofences.dart';
 import 'models.dart';
 import 'storage.dart';
 
@@ -40,6 +41,7 @@ class Sequenzy {
   static void unconfigure() {
     _client = null;
     urlOpener = _launch;
+    settingsOpener = _openAppSettings;
   }
 
   static SequenzyClient _require() {
@@ -124,6 +126,20 @@ class Sequenzy {
     return true;
   }
 
+  /// The signed-in contact, or null. Geofence plugins only watch places for
+  /// identified contacts.
+  static Future<String?> identifiedEmail() => _require().email();
+
+  /// The nearest active geofences around a position. Usually called by the
+  /// `sequenzy_flutter_geofences` plugin rather than the app.
+  static Future<NearbyGeofences> fetchNearbyGeofences(double latitude, double longitude, {int? limit}) =>
+      _require().fetchNearbyGeofences(
+          latitude, longitude, limit ?? Geofencing.fetchLimit(Geofencing.defaultMaxRegionsIOS));
+
+  /// Reports an enter or exit for a geofence your own region monitoring saw.
+  static Future<bool> trackGeofenceTransition(String geofenceId, GeofenceTransition transition, {DateTime? at}) =>
+      _require().trackGeofenceTransition(geofenceId, transition, at: at);
+
   /// Open in-app messages, for apps that present them themselves. Custom HTML
   /// messages are included only with [includeHtml].
   static Future<List<InAppMessage>> fetchMessages({bool includeHtml = false}) => _require().fetchFeed(
@@ -136,15 +152,34 @@ class Sequenzy {
   static Future<bool> report(InAppEventType type, InAppMessage message, {String? buttonId}) =>
       _require().report(type, message.id, buttonId: buttonId);
 
-  /// Reports the click and opens the button's URL; dismiss buttons report a dismissal.
+  /// How the SDK opens the app's settings when
+  /// [SequenzyPushPermission.openSettings] is not set.
+  static Future<void> Function() settingsOpener = _openAppSettings;
+
+  /// Asks for notification permission (needs [SequenzyConfig.pushPermission]):
+  /// the system prompt when the OS still shows one, otherwise the app's
+  /// notification settings. Returns the permission afterwards.
+  static Future<PushPermissionStatus?> requestPushPermission() => _require().requestPushPermission(settingsOpener);
+
+  /// Reports the click and performs the button's action: opens its URL, or
+  /// asks for push permission and reports the result with the click. Dismiss
+  /// buttons report a dismissal.
   static Future<void> handleButtonPress(InAppButton button, InAppMessage message) async {
-    if (!button.opensUrl) {
+    if (!button.acts) {
       await report(InAppEventType.dismissed, message);
+      return;
+    }
+    if (button.requestsPushPermission) {
+      final client = _require();
+      final pushPermission = await client.requestPushPermission(settingsOpener);
+      await client.report(InAppEventType.clicked, message.id, pushPermission: pushPermission);
       return;
     }
     await report(InAppEventType.clicked, message);
     if (button.url != null) await urlOpener(button.url!);
   }
+
+  static Future<void> _openAppSettings() => _launch('app-settings:');
 
   static Future<void> _launch(String url) async {
     final uri = Uri.tryParse(url);

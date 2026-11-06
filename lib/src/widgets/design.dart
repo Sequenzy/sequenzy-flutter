@@ -83,7 +83,8 @@ const scrimGradient = LinearGradient(
 
 /// The primary button (first link, or first button) and the other one.
 ({InAppButton? primary, InAppButton? secondary}) splitButtons(List<InAppButton> buttons) {
-  final index = buttons.indexWhere((button) => button.opensUrl);
+  // The first button that acts: opens a link or asks for push permission
+  final index = buttons.indexWhere((button) => button.acts);
   final primaryIndex = index == -1 ? 0 : index;
   InAppButton? secondary;
   for (var i = 0; i < buttons.length; i++) {

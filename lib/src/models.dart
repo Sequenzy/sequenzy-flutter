@@ -133,17 +133,30 @@ class InAppButton {
 
   final String label;
 
-  /// `open_url` or `dismiss`.
+  /// `open_url`, `dismiss` or `request_push_permission` (a push primer,
+  /// served only when [SequenzyConfig.pushPermission] is set).
   final String action;
 
-  /// Null for dismiss buttons.
+  /// Null unless the button opens a link.
   final String? url;
 
   bool get opensUrl => action == 'open_url';
 
+  /// A push primer button: asks for notification permission.
+  bool get requestsPushPermission => action == requestPushPermissionAction;
+
+  /// Opens a link or asks for push permission, rather than closing.
+  bool get acts => action != 'dismiss';
+
+  static const requestPushPermissionAction = 'request_push_permission';
+
   static InAppButton? fromJson(Object? json) {
     if (json is! Map || json['label'] is! String) return null;
-    final action = json['action'] == 'dismiss' ? 'dismiss' : 'open_url';
+    final action = switch (json['action']) {
+      'dismiss' => 'dismiss',
+      requestPushPermissionAction => requestPushPermissionAction,
+      _ => 'open_url',
+    };
     return InAppButton(label: json['label'] as String, action: action, url: _string(json['url']));
   }
 
@@ -215,6 +228,52 @@ class InAppStyle {
 
 /// `displayed`, `clicked`, `dismissed` or `read`.
 enum InAppEventType { displayed, clicked, dismissed, read }
+
+/// The OS notification permission. [provisional] (iOS) delivers quietly to
+/// Notification Center; [ephemeral] is an App Clip's temporary permission.
+enum PushPermissionStatus {
+  granted('granted'),
+  provisional('provisional'),
+  ephemeral('ephemeral'),
+  denied('denied'),
+  notDetermined('not_determined');
+
+  const PushPermissionStatus(this.wire);
+
+  /// The value the API uses.
+  final String wire;
+
+  /// Reads a status by name: Sequenzy's own (`not_determined`), Firebase
+  /// Messaging's `AuthorizationStatus` (`authorized`, `notDetermined`, ...)
+  /// or permission_handler's `PermissionStatus` (`permanentlyDenied`, ...).
+  /// Pass `status.name`. Unknown names read as [notDetermined].
+  static PushPermissionStatus fromName(String name) => switch (name) {
+        'granted' || 'authorized' || 'limited' => granted,
+        'provisional' => provisional,
+        'ephemeral' => ephemeral,
+        'denied' || 'permanentlyDenied' || 'restricted' => denied,
+        _ => notDetermined,
+      };
+}
+
+/// How the SDK reads and asks for notification permission. Flutter has no
+/// built-in API for it, so pass your plugin's calls, for example Firebase
+/// Messaging's `getNotificationSettings()` and `requestPermission()`.
+class SequenzyPushPermission {
+  const SequenzyPushPermission({required this.getStatus, required this.request, this.openSettings});
+
+  /// The current permission, without prompting.
+  final Future<PushPermissionStatus> Function() getStatus;
+
+  /// Shows the system prompt (when the OS still allows it) and returns the result.
+  final Future<PushPermissionStatus> Function() request;
+
+  /// Opens the app's notification settings for contacts who turned
+  /// notifications off, e.g. `openAppSettings()` from permission_handler or
+  /// app_settings. Needed on Android; on iOS the SDK falls back to the
+  /// `app-settings:` URL.
+  final Future<void> Function()? openSettings;
+}
 
 /// The fields Sequenzy adds to every push notification.
 class PushPayload {

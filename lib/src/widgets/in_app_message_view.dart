@@ -85,7 +85,7 @@ mixin _Presence<T extends StatefulWidget> on State<T>, TickerProviderStateMixin<
   }
 
   void Function(InAppButton) buttonHandler(InAppMessageView view) =>
-      (button) => exit(() => button.opensUrl ? view.onPress(button) : view.onDismiss());
+      (button) => exit(() => button.acts ? view.onPress(button) : view.onDismiss());
 
   @override
   void dispose() {
@@ -432,7 +432,7 @@ class _BannerState extends State<_Banner> with TickerProviderStateMixin, _Presen
     final palette = Palette.surface(style);
     final type = InAppType(style.primaryFont);
     final (:primary, secondary: _) = splitButtons(message.buttons);
-    final link = primary != null && primary.opensUrl ? primary : null;
+    final link = primary != null && primary.acts ? primary : null;
     final direction = top ? -1.0 : 1.0;
     final edge = top ? 8 + media.viewPadding.top : 12 + media.viewPadding.bottom;
     final hasTitle = message.title.isNotEmpty;

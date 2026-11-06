@@ -3,6 +3,7 @@
 library;
 
 export 'src/client.dart';
+export 'src/geofences.dart';
 export 'src/in_app_html.dart';
 export 'src/models.dart';
 export 'src/sequenzy.dart';

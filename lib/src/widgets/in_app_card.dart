@@ -44,7 +44,7 @@ class _InAppCardViewState extends State<InAppCardView> {
     }
 
     void press(InAppButton button) {
-      if (button.opensUrl) {
+      if (button.acts) {
         unawaited(Sequenzy.handleButtonPress(button, card));
       } else {
         dismiss();

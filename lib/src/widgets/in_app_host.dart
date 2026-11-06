@@ -252,8 +252,15 @@ class _SequenzyInAppHostState extends State<SequenzyInAppHost> with WidgetsBindi
               _close();
             },
             onPress: (button) {
+              // A banner tap (null) acts like its primary button
+              final target = button ?? message.buttons.where((candidate) => candidate.acts).firstOrNull;
+              if (target != null && target.requestsPushPermission) {
+                unawaited(Sequenzy.handleButtonPress(target, message));
+                _close();
+                return;
+              }
               unawaited(Sequenzy.report(InAppEventType.clicked, message));
-              final url = button?.url ??
+              final url = target?.url ??
                   message.buttons
                       .where((candidate) => candidate.opensUrl)
                       .map((candidate) => candidate.url)

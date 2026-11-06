@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:sequenzy_flutter/sequenzy_flutter.dart';
+import 'package:sequenzy_flutter_geofences/sequenzy_flutter_geofences.dart';
 
 // Configure with --dart-define, e.g.
 //   flutter run --dart-define=SEQUENZY_PUBLIC_KEY=seq_pk_... \
@@ -43,6 +45,8 @@ void main() {
   ));
   // With firebase_messaging: use getToken() on Android and getAPNSToken() on iOS.
   // and Sequenzy.handleNotificationOpened(message.data) from onMessageOpenedApp.
+  // Geofencing is native only.
+  if (!kIsWeb) unawaited(SequenzyGeofences.start());
   runApp(const ExampleApp());
 }
 
@@ -162,6 +166,18 @@ class _HomePageState extends State<HomePage> {
                   child: const Text('Set goal: strength'),
                 ),
                 const SizedBox(height: 8),
+                if (!kIsWeb) ...[
+                  OutlinedButton(
+                    onPressed: () async {
+                      final authorization = await SequenzyGeofences.requestAuthorization();
+                      await SequenzyGeofences.enable();
+                      final status = await SequenzyGeofences.status();
+                      setState(() => _status = 'Location: ${authorization.name}, watching ${status.regionIds.length} regions');
+                    },
+                    child: const Text('Turn on geofencing'),
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 OutlinedButton(
                   onPressed: () async {
                     await Sequenzy.reset();

@@ -1,0 +1,4 @@
+# Develop and test against the SDK in this repository. Not published.
+dependency_overrides:
+  sequenzy_flutter:
+    path: ..

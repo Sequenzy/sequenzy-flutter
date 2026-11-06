@@ -5,11 +5,12 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'geofences.dart';
 import 'in_app_html.dart';
 import 'models.dart';
 import 'storage.dart';
 
-const sequenzySdkVersion = '0.1.2';
+const sequenzySdkVersion = '0.2.0';
 const defaultApiBaseUrl = 'https://api.sequenzy.com';
 
 enum SequenzyLogLevel { none, error, info, debug }
@@ -33,6 +34,7 @@ class SequenzyConfig {
     this.deviceName,
     this.locale,
     this.timezone,
+    this.pushPermission,
   });
 
   /// Publishable key (`seq_pk_...`) restricted to your app IDs.
@@ -52,6 +54,12 @@ class SequenzyConfig {
   final String? deviceName;
   final String? locale;
   final String? timezone;
+
+  /// Reads and requests notification permission. With it the SDK reports
+  /// each device's permission (for your opt-in rate and the contact's
+  /// `pushPermission` attribute) and shows push primers: in-app messages
+  /// whose button asks for permission.
+  final SequenzyPushPermission? pushPermission;
 }
 
 class SequenzyException implements Exception {
@@ -68,10 +76,15 @@ class SequenzyException implements Exception {
 }
 
 class _QueuedEvent {
-  _QueuedEvent(this.name, this.eventId, this.properties, this.occurredAt, [this.type]);
+  _QueuedEvent(this.name, this.eventId, this.properties, this.occurredAt,
+      [this.type, this.transition, this.geofenceId]);
 
-  /// `screen` or `commerce`; null for custom events.
+  /// `screen`, `commerce` or `geofence`; null for custom events.
   final String? type;
+
+  /// `enter` or `exit`, for geofence events.
+  final String? transition;
+  final String? geofenceId;
   final String name;
   final String eventId;
   final Map<String, Object?> properties;
@@ -83,6 +96,8 @@ class _QueuedEvent {
         'eventId': eventId,
         'properties': properties,
         'occurredAt': occurredAt,
+        if (transition != null) 'transition': transition,
+        if (geofenceId != null) 'geofenceId': geofenceId,
       };
 
   static _QueuedEvent? fromJson(Object? json) {
@@ -98,6 +113,8 @@ class _QueuedEvent {
       properties is Map ? Map<String, Object?>.from(properties) : const {},
       occurredAt,
       json['type'] is String ? json['type'] as String : null,
+      json['transition'] is String ? json['transition'] as String : null,
+      json['geofenceId'] is String ? json['geofenceId'] as String : null,
     );
   }
 }
@@ -286,6 +303,8 @@ class SequenzyClient {
           _identityToken = null;
           await _store.setString('email', normalized);
           await _store.setString('identityToken', null);
+          // Another contact's recent geofence transitions must not suppress this one's.
+          await _store.setString('geofenceTransitions', null);
         }
         if (identityToken != null && identityToken.isNotEmpty) {
           _identityToken = identityToken;
@@ -343,6 +362,7 @@ class SequenzyClient {
         _events = [];
         _pendingProfile = null;
         await _store.setString('profile', null);
+        await _store.setString('geofenceTransitions', null);
         await _store.setString('email', null);
         await _store.setString('identityToken', null);
         await _store.setString('pushRegistration', null);
@@ -641,16 +661,30 @@ class SequenzyClient {
   /// Registers the token when it or the user changed, or the last registration is a day old.
   Future<void> registerPushIfNeeded({bool force = false}) => _run(() => _registerPush(force: force));
 
+  /// The permission from [SequenzyConfig.pushPermission]; null when unknown.
+  Future<PushPermissionStatus?> _readPushPermission() async {
+    final handler = config.pushPermission;
+    if (handler == null) return null;
+    try {
+      return await handler.getStatus();
+    } catch (error) {
+      _log(SequenzyLogLevel.info, 'Could not read push permission: $error');
+      return null;
+    }
+  }
+
   Future<void> _registerPush({required bool force}) async {
     final token = _pushToken;
     if (token == null || !_pushPlatform) return;
     final identity = _email ?? '';
+    final permission = await _readPushPermission();
     final last = _pushRegistration;
     final lastAt = last?['registeredAt'];
     if (!force &&
         last != null &&
         last['token'] == token &&
         last['email'] == identity &&
+        (permission == null || last['permission'] == permission.wire) &&
         lastAt is int &&
         _now().millisecondsSinceEpoch - lastAt < pushRefreshInterval.inMilliseconds) {
       return;
@@ -662,6 +696,7 @@ class SequenzyClient {
       'platform': config.platform,
       'token': token,
       'anonymousId': await _ensureAnonymousId(),
+      if (permission != null) 'permission': permission.wire,
       if (config.appVersion?.isNotEmpty == true) 'appVersion': config.appVersion,
       if (config.osVersion?.isNotEmpty == true) 'osVersion': config.osVersion,
       if (config.deviceName?.isNotEmpty == true) 'deviceName': config.deviceName,
@@ -696,11 +731,47 @@ class SequenzyClient {
       'token': token,
       'email': identified ? identity : '',
       'registeredAt': _now().millisecondsSinceEpoch,
+      if (permission != null) 'permission': permission.wire,
     };
     await _store.setString('pushRegistration', jsonEncode(_pushRegistration));
     if (response.body?['pushConfigured'] == false) {
       _log(SequenzyLogLevel.info,
           'Device registered, but ${config.platform} push credentials are not set up in Sequenzy yet');
+    }
+  }
+
+  /// Asks for notification permission the way a push primer does: the
+  /// system prompt when the OS still shows one, otherwise (the contact
+  /// turned notifications off) the app's notification settings through
+  /// [openSettings]. Runs outside the serialized queue, since the prompt waits
+  /// for the user. Returns null without [SequenzyConfig.pushPermission].
+  Future<PushPermissionStatus?> requestPushPermission(Future<void> Function() openSettings) async {
+    final handler = config.pushPermission;
+    if (handler == null) {
+      _log(SequenzyLogLevel.error, 'Pass pushPermission to SequenzyConfig to ask for notification permission');
+      return null;
+    }
+    try {
+      final before = await handler.getStatus();
+      if (before == PushPermissionStatus.granted || before == PushPermissionStatus.ephemeral) return before;
+      final after = await handler.request();
+      // iOS answers a second request without a prompt, and Android stops
+      // prompting after repeated denials: send them to Settings instead.
+      if (before == PushPermissionStatus.denied && after == PushPermissionStatus.denied) {
+        // The app-settings: fallback URL only exists on iOS.
+        final opener = handler.openSettings ?? (config.platform == 'ios' ? openSettings : null);
+        if (opener != null) {
+          await opener();
+        } else {
+          _log(SequenzyLogLevel.error,
+              'Notifications are turned off; pass SequenzyPushPermission.openSettings (for example openAppSettings from permission_handler) so the SDK can open the settings on Android');
+        }
+      }
+      await registerPushIfNeeded();
+      return after;
+    } catch (error) {
+      _log(SequenzyLogLevel.error, 'Push permission request failed: $error');
+      return null;
     }
   }
 
@@ -827,6 +898,8 @@ class SequenzyClient {
               if (kind != null) 'kind': kind,
               if (limit != null) 'limit': limit,
               if (formats != null) 'formats': formats,
+              // Push primers come only when this app can ask for permission
+              if (config.pushPermission != null) 'actions': [InAppButton.requestPushPermissionAction],
             }));
         switch (result) {
           case _NotIdentified():
@@ -846,9 +919,97 @@ class SequenzyClient {
         }
       });
 
+  // region Geofences
+
+  /// The nearest active geofences around a position, rounded to two decimals
+  /// here whatever the caller passes.
+  Future<NearbyGeofences> fetchNearbyGeofences(double latitude, double longitude, int limit) => _run(() async {
+        final result = await _withIdentity((email, token) => _post('/api/v1/geofences/nearby', {
+              'companyId': config.companyId,
+              'publicKey': config.publicKey,
+              'email': email,
+              'identityToken': token,
+              'latitude': Geofencing.roundCoordinate(latitude),
+              'longitude': Geofencing.roundCoordinate(longitude),
+              'limit': limit.clamp(1, 99),
+            }));
+        switch (result) {
+          case _NotIdentified():
+            throw SequenzyException('Call identify(email, identityToken: ...) first', 'not_identified');
+          case _Rejected():
+            throw SequenzyException('The identity token was rejected', 'identity_rejected');
+          case _Failed(:final error):
+            throw error;
+          case _IdentifiedResponse(:final response):
+            if (!response.ok) {
+              throw SequenzyException('HTTP ${response.status} ${_error(response)}'.trim(), 'http', response.status);
+            }
+            return NearbyGeofences.fromJson(response.body);
+        }
+      });
+
+  /// The signed-in email and its identity token, for native code that
+  /// reports while Dart is not running (the geofence plugins). Asks the
+  /// identity token provider when no token is stored or [refresh] is set.
+  Future<({String email, String identityToken})?> identityCredentials({bool refresh = false}) => _run(() async {
+        final email = _email;
+        if (email == null) return null;
+        var token = _identityToken;
+        if (token == null || refresh) {
+          token = await _tokenFromProvider(email) ?? (refresh ? token : null);
+        }
+        if (token == null) return null;
+        return (email: email, identityToken: token);
+      });
+
+  /// Queues an enter or exit the OS reported. The refresh region and a repeat
+  /// of the same transition within a minute are ignored. Returns whether it
+  /// was queued.
+  Future<bool> trackGeofenceTransition(String geofenceId, GeofenceTransition transition, {DateTime? at}) =>
+      _run(() async {
+        final id = geofenceId.trim();
+        if (id.isEmpty || id == GeofenceRegion.refreshRegionId) return false;
+        // Visits belong to a contact; never queue one for whoever signs in next.
+        if (_email == null) return false;
+        final occurredAt = (at ?? _now()).toUtc();
+        final recent = <String, int>{};
+        final stored = _decodeObject(await _store.getString('geofenceTransitions'));
+        stored?.forEach((key, value) {
+          if (value is num) recent[key] = value.toInt();
+        });
+        final key = '$id:${transition.wire}';
+        final last = recent[key];
+        final millis = occurredAt.millisecondsSinceEpoch;
+        if (last != null && (millis - last).abs() < Geofencing.debounce.inMilliseconds) {
+          _log(SequenzyLogLevel.debug, 'Ignored repeated geofence ${transition.wire} for $id');
+          return false;
+        }
+        recent[key] = millis;
+        final cutoff = _now().millisecondsSinceEpoch - maxEventAge.inMilliseconds;
+        recent.removeWhere((_, value) => value <= cutoff);
+        await _store.setString('geofenceTransitions', jsonEncode(recent));
+        _events.add(_QueuedEvent('geofence', _uuid(), const {}, occurredAt.toIso8601String(), 'geofence',
+            transition.wire, id));
+        if (_events.length > maxQueuedEvents) {
+          _events.removeRange(0, _events.length - maxQueuedEvents);
+        }
+        await _persistEvents();
+        await _flush();
+        return true;
+      });
+
+  // endregion
+
   /// Reports `displayed`, `clicked`, `dismissed` or `read` for a feed item.
-  /// [buttonId] names the control clicked in a custom HTML message.
-  Future<bool> report(InAppEventType type, String messageId, {String? buttonId}) => _run(() async {
+  /// [buttonId] names the control clicked in a custom HTML message. A push
+  /// primer's click carries the permission read after asking.
+  Future<bool> report(
+    InAppEventType type,
+    String messageId, {
+    String? buttonId,
+    PushPermissionStatus? pushPermission,
+  }) =>
+      _run(() async {
         final result = await _withIdentity((email, token) => _post('/api/v1/in-app/feed/events', {
               'companyId': config.companyId,
               'publicKey': config.publicKey,
@@ -858,6 +1019,7 @@ class SequenzyClient {
               'type': type.name,
               if (buttonId != null && type == InAppEventType.clicked && InAppHtmlBridgeMessage.isValidButtonId(buttonId))
                 'buttonId': buttonId,
+              if (pushPermission != null) 'pushPermission': pushPermission.wire,
             }));
         final ok = result is _IdentifiedResponse && result.response.ok;
         if (!ok) _log(SequenzyLogLevel.error, 'Could not report in-app ${type.name} for $messageId');

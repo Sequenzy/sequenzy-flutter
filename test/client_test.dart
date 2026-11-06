@@ -50,7 +50,7 @@ class Harness {
     return http.Response('{"success":true}', 200);
   });
 
-  SequenzyClient make({IdentityTokenProvider? provider, String platform = 'ios'}) {
+  SequenzyClient make({IdentityTokenProvider? provider, String platform = 'ios', SequenzyPushPermission? pushPermission}) {
     final config = contract['config'] as Map<String, dynamic>;
     return SequenzyClient(
       SequenzyConfig(
@@ -66,6 +66,7 @@ class Harness {
         deviceName: 'Test',
         locale: 'en-US',
         timezone: 'UTC',
+        pushPermission: pushPermission,
       ),
       store: store,
       httpClient: httpClient,
@@ -243,15 +244,18 @@ void main() {
       await client.identify(email, identityToken: identityToken);
       final messages = await client.fetchFeed(kind: 'message');
       expectContract(harness.to('/api/v1/in-app/feed').last, 'fetchFeed');
-      expect(messages.map((message) => message.id), ['iam_modal', 'iam_banner', 'iam_card']);
+      expect(messages.map((message) => message.id), ['iam_modal', 'iam_banner', 'iam_primer', 'iam_card']);
+      expect(messages[2].buttons[0].requestsPushPermission, isTrue);
+      expect(messages[2].buttons[0].acts, isTrue);
+      expect(messages[2].buttons[1].acts, isFalse);
       expect(messages[0].resolvedFormat, 'modal');
       expect(messages[0].buttons[0], const InAppButton(label: 'Upgrade', action: 'open_url', url: 'myapp://billing'));
       expect(messages[0].buttons[1].opensUrl, isFalse);
       expect(messages[0].style.fontFamilies, ['Inter', 'Arial']);
       expect(messages[0].data, {'campaign': 'trial'});
       expect(messages[1].resolvedPosition, 'top');
-      expect(messages[2].isCard, isTrue);
-      expect(messages[2].pinned, isTrue);
+      expect(messages[3].isCard, isTrue);
+      expect(messages[3].pinned, isTrue);
 
       expect(await client.report(InAppEventType.displayed, 'iam_modal'), isTrue);
       expectContract(harness.requests.last, 'reportInAppEvent');
@@ -508,6 +512,106 @@ void main() {
     });
   });
 
+  group('push permission', () {
+    late Harness harness;
+    setUp(() => harness = Harness());
+
+    ({SequenzyPushPermission handler, Map<String, int> calls, List<PushPermissionStatus> status}) permission(
+        PushPermissionStatus initial,
+        [PushPermissionStatus? afterRequest]) {
+      final status = [initial];
+      final calls = {'request': 0, 'settings': 0};
+      return (
+        handler: SequenzyPushPermission(
+          getStatus: () async => status[0],
+          request: () async {
+            calls['request'] = calls['request']! + 1;
+            status[0] = afterRequest ?? status[0];
+            return status[0];
+          },
+          openSettings: () async {
+            calls['settings'] = calls['settings']! + 1;
+          },
+        ),
+        calls: calls,
+        status: status,
+      );
+    }
+
+    test('sends the permission with registrations and registers again when it changes', () async {
+      final p = permission(PushPermissionStatus.denied);
+      final client = harness.make(pushPermission: p.handler);
+      await client.identify(email, identityToken: identityToken);
+      await client.setPushToken(pushToken);
+      expectContract(harness.to('/api/v1/push/app-devices').last, 'registerDeviceWithPermission');
+      final count = harness.to('/api/v1/push/app-devices').length;
+      await client.registerPushIfNeeded();
+      expect(harness.to('/api/v1/push/app-devices'), hasLength(count));
+      p.status[0] = PushPermissionStatus.granted;
+      await client.registerPushIfNeeded();
+      expect(harness.to('/api/v1/push/app-devices'), hasLength(count + 1));
+      expect(harness.to('/api/v1/push/app-devices').last.body['permission'], 'granted');
+    });
+
+    test('asks for push primers only when it can ask for permission', () async {
+      harness.respondTo('/api/v1/in-app/feed', 200, {'messages': <Object>[]});
+      final plain = harness.make();
+      await plain.identify(email, identityToken: identityToken);
+      await plain.fetchFeed(kind: 'message');
+      expectContract(harness.to('/api/v1/in-app/feed').last, 'fetchFeed');
+      expect(harness.to('/api/v1/in-app/feed').last.body.containsKey('actions'), isFalse);
+      final able = harness.make(pushPermission: permission(PushPermissionStatus.notDetermined).handler);
+      await able.fetchFeed(kind: 'message');
+      expectContract(harness.to('/api/v1/in-app/feed').last, 'fetchFeedWithPushPrimers');
+    });
+
+    test('reports a primer click with the permission', () async {
+      final client = harness.make();
+      await client.identify(email, identityToken: identityToken);
+      await client.report(InAppEventType.clicked, 'iam_primer', pushPermission: PushPermissionStatus.granted);
+      expectContract(harness.requests.last, 'reportPushPrimerClicked');
+    });
+
+    test('prompts when the OS allows it and sends a second denial to Settings', () async {
+      var fallback = 0;
+      Future<void> opener() async => fallback += 1;
+      final fresh = permission(PushPermissionStatus.notDetermined, PushPermissionStatus.granted);
+      expect(await harness.make(pushPermission: fresh.handler).requestPushPermission(opener),
+          PushPermissionStatus.granted);
+      expect(fresh.calls, {'request': 1, 'settings': 0});
+      final off = permission(PushPermissionStatus.denied);
+      expect(await harness.make(pushPermission: off.handler).requestPushPermission(opener), PushPermissionStatus.denied);
+      expect(off.calls, {'request': 1, 'settings': 1});
+      final allowed = permission(PushPermissionStatus.granted);
+      expect(await harness.make(pushPermission: allowed.handler).requestPushPermission(opener),
+          PushPermissionStatus.granted);
+      expect(allowed.calls['request'], 0);
+      expect(await harness.make().requestPushPermission(opener), isNull);
+      expect(fallback, 0);
+    });
+
+    test('opens no iOS-only Settings URL on Android without an opener', () async {
+      var fallback = 0;
+      Future<void> opener() async => fallback += 1;
+      final off = permission(PushPermissionStatus.denied);
+      final handler = SequenzyPushPermission(getStatus: off.handler.getStatus, request: off.handler.request);
+      final android = harness.make(platform: 'android', pushPermission: handler);
+      expect(await android.requestPushPermission(opener), PushPermissionStatus.denied);
+      expect(fallback, 0);
+      final ios = harness.make(pushPermission: handler);
+      expect(await ios.requestPushPermission(opener), PushPermissionStatus.denied);
+      expect(fallback, 1);
+    });
+
+    test('reads Firebase Messaging and permission_handler status names', () {
+      expect(PushPermissionStatus.fromName('authorized'), PushPermissionStatus.granted);
+      expect(PushPermissionStatus.fromName('notDetermined'), PushPermissionStatus.notDetermined);
+      expect(PushPermissionStatus.fromName('provisional'), PushPermissionStatus.provisional);
+      expect(PushPermissionStatus.fromName('permanentlyDenied'), PushPermissionStatus.denied);
+      expect(PushPermissionStatus.fromName('granted'), PushPermissionStatus.granted);
+    });
+  });
+
   group('Live Activity tokens', () {
     late Harness harness;
     setUp(() => harness = Harness());
@@ -613,6 +717,116 @@ void main() {
       expect(LiveActivityToken.fromJson(pushToStart().toJson()), pushToStart());
     });
   });
+
+  group('geofences', () {
+    final geofences = contract['geofences'] as Map<String, dynamic>;
+
+    test('fetches nearby geofences with a rounded position', () async {
+      harness.respondTo('/api/v1/geofences/nearby', 200, geofences['nearbyResponse'] as Object);
+      final client = harness.make();
+      await client.identify(email, identityToken: identityToken);
+      final nearby = await client.fetchNearbyGeofences(
+          51.5074, -0.1404, Geofencing.fetchLimit(Geofencing.defaultMaxRegionsIOS));
+      expectContract(harness.to('/api/v1/geofences/nearby').last, 'fetchNearbyGeofences');
+      expect(nearby.geofences.map((region) => region.id), ['geo_1', 'geo_2']);
+      expect(nearby.geofences.first.radiusMeters, 200);
+      expect(nearby.refreshRadiusMeters, 4200);
+    });
+
+    test('requires identity for nearby geofences', () async {
+      final client = harness.make();
+      await expectLater(
+        client.fetchNearbyGeofences(51.5, -0.1, 19),
+        throwsA(isA<SequenzyException>().having((error) => error.code, 'code', 'not_identified')),
+      );
+      expect(harness.to('/api/v1/geofences/nearby'), isEmpty);
+    });
+
+    test('reports transitions through the queue, debounced, never the refresh region', () async {
+      final client = harness.make();
+      await client.identify(email, identityToken: identityToken);
+      expect(await client.trackGeofenceTransition('geo_1', GeofenceTransition.enter), isTrue);
+      final request = harness.to('/api/v1/app-events').last;
+      expectContract(request, 'trackGeofenceTransition');
+      final event = (request.body['events'] as List).single as Map<String, dynamic>;
+      final expected = ((spec('trackGeofenceTransition')['body'] as Map)['events'] as List).single as Map;
+      expected.forEach((key, value) => expect(event[key], value, reason: 'event.$key'));
+      expect(event['occurredAt'], '2026-10-14T17:46:40.000Z');
+
+      harness.now = harness.now.add(const Duration(seconds: 30));
+      expect(await client.trackGeofenceTransition('geo_1', GeofenceTransition.enter), isFalse);
+      expect(await client.trackGeofenceTransition('geo_1', GeofenceTransition.exit), isTrue);
+      expect(await client.trackGeofenceTransition(GeofenceRegion.refreshRegionId, GeofenceTransition.exit), isFalse);
+      harness.now = harness.now.add(const Duration(seconds: 61));
+      expect(await client.trackGeofenceTransition('geo_1', GeofenceTransition.enter), isTrue);
+      expect(harness.to('/api/v1/app-events'), hasLength(3));
+    });
+
+    test('keeps queued geofence events across restarts and forgets the debounce on reset', () async {
+      harness.respondTo('/api/v1/app-events', 503, {'error': 'down'});
+      final client = harness.make();
+      await client.identify(email, identityToken: identityToken);
+      await client.trackGeofenceTransition('geo_2', GeofenceTransition.exit);
+      harness.responders.clear();
+      final restarted = harness.make();
+      await restarted.flush();
+      final event = (harness.to('/api/v1/app-events').last.body['events'] as List).single as Map;
+      expect(event['transition'], 'exit');
+      expect(event['geofenceId'], 'geo_2');
+
+      await restarted.reset();
+      await restarted.identify(email, identityToken: identityToken);
+      expect(await restarted.trackGeofenceTransition('geo_2', GeofenceTransition.exit), isTrue);
+    });
+
+    test('drops transitions while nobody is identified', () async {
+      final client = harness.make();
+      expect(await client.trackGeofenceTransition('geo_1', GeofenceTransition.enter), isFalse);
+      expect(await client.queuedEventCount(), 0);
+    });
+
+    test('does not debounce another contact by the previous one', () async {
+      final client = harness.make();
+      await client.identify(email, identityToken: identityToken);
+      expect(await client.trackGeofenceTransition('geo_1', GeofenceTransition.enter), isTrue);
+      await client.identify('sam@example.com', identityToken: identityToken);
+      expect(await client.trackGeofenceTransition('geo_1', GeofenceTransition.enter), isTrue);
+    });
+
+    test('hands identity credentials to native reporters, asking the provider when told to', () async {
+      var calls = 0;
+      final client = harness.make(provider: (email) async => 'seq_wid_fresh.${++calls}');
+      expect(await client.identityCredentials(), isNull);
+      await client.identify(email, identityToken: identityToken);
+      expect(await client.identityCredentials(), (email: email, identityToken: identityToken));
+      expect(calls, 0);
+      expect(await client.identityCredentials(refresh: true), (email: email, identityToken: 'seq_wid_fresh.1'));
+      expect(await client.identityCredentials(), (email: email, identityToken: 'seq_wid_fresh.1'));
+      await client.reset();
+      expect(await client.identityCredentials(), isNull);
+    });
+
+    test('plans the nearest geofences plus a refresh region and diffs changes', () {
+      final nearby = NearbyGeofences.fromJson(geofences['nearbyResponse'] as Map<String, Object?>);
+      final planned = Geofencing.plan(nearby, latitude: 51.5074, longitude: -0.1404, maxRegions: 2);
+      expect(planned.map((region) => region.id), ['geo_1', geofences['refreshRegionId']]);
+      expect(planned.last, const GeofenceRegion(
+          id: GeofenceRegion.refreshRegionId, latitude: 51.5074, longitude: -0.1404, radiusMeters: 4200));
+      final all = NearbyGeofences(geofences: nearby.geofences);
+      expect(Geofencing.plan(all, latitude: 0, longitude: 0, maxRegions: 20).map((region) => region.id),
+          ['geo_1', 'geo_2']);
+
+      final moved = GeofenceRegion(id: 'geo_1', latitude: 1, longitude: 1, radiusMeters: 200);
+      final changes = Geofencing.diff(planned, [moved, planned.last]);
+      expect(changes.remove, ['geo_1']);
+      expect(changes.add, [moved]);
+      expect(Geofencing.fetchLimit(20), 19);
+      expect(Geofencing.fetchLimit(1), 1);
+      expect(Geofencing.fetchLimit(500), 99);
+      expect(Geofencing.roundCoordinate(-0.1404), -0.14);
+      expect(GeofenceRegion.fromJson(planned.first.toJson()), planned.first);
+    });
+  });
 }
 
 class _FlakyStore implements SequenzyStore {
@@ -631,4 +845,5 @@ class _FlakyStore implements SequenzyStore {
 
   @override
   Future<void> setString(String key, String? value) => inner.setString(key, value);
+
 }

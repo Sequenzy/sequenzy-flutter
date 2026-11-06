@@ -1,9 +1,10 @@
-## 0.1.2
+## 0.2.0
 
-- Fixes and improvements.
-
-## Unreleased
-
+- Geofencing: `Sequenzy.fetchNearbyGeofences` and
+  `Sequenzy.trackGeofenceTransition` for apps that monitor regions
+  themselves, and `identityCredentials` for the new
+  `sequenzy_flutter_geofences` plugin, which watches your places natively on
+  iOS and Android.
 - Custom HTML in-app messages: `SequenzyInAppHost` shows `html` messages
   (surveys, Braze-style custom HTML) in a WebView with the Sequenzy JS bridge;
   `showHtmlMessages: false` turns them off. Adds a `webview_flutter`
