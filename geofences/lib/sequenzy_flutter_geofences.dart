@@ -163,10 +163,11 @@ abstract final class SequenzyGeofences {
   }
 
   /// Whether the native side holds this token as rejected.
-  static Future<bool> _setIdentity(({String email, String identityToken})? credentials) async =>
+  static Future<bool> _setIdentity(({String? email, String? externalId, String identityToken})? credentials) async =>
       await _channel.invokeMethod<bool>('setIdentity', {
         'email': credentials?.email,
         'identityToken': credentials?.identityToken,
+        if (credentials?.externalId != null) 'externalId': credentials?.externalId,
       }) ==
       true;
 

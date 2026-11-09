@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'sequenzy_flutter_geofences'
-  s.version          = '0.2.1'
+  s.version          = '0.3.0'
   s.summary          = 'Geofencing for the Sequenzy Flutter SDK.'
   s.description      = 'Core Location region monitoring that reports when the signed-in contact enters or leaves your Sequenzy geofences.'
   s.homepage         = 'https://sequenzy.com'

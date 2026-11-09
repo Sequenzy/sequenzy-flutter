@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -6,8 +7,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:sequenzy_flutter/sequenzy_flutter.dart';
+import 'package:sequenzy_flutter/src/widgets/parts.dart';
 
 final feed = jsonDecode(File('../contract/fixtures/feed-response.json').readAsStringSync()) as Map<String, dynamic>;
+final placementsFixture =
+    jsonDecode(File('../contract/fixtures/placements-response.json').readAsStringSync()) as Map<String, dynamic>;
 
 class Call {
   Call(this.path, this.body);
@@ -19,6 +23,7 @@ void main() {
   late List<Call> calls;
   late List<String> opened;
   late List<dynamic> feedMessages;
+  late Map<String, dynamic> placementItems;
 
   List<String> reports(String type) => calls
       .where((call) => call.path == '/api/v1/in-app/feed/events' && call.body['type'] == type)
@@ -29,6 +34,9 @@ void main() {
     calls = [];
     opened = [];
     feedMessages = feed['messages'] as List;
+    placementItems = {
+      'home_hero': ((placementsFixture['placements'] as List).first as Map)['message'],
+    };
     Sequenzy.unconfigure();
     Sequenzy.configure(
       const SequenzyConfig(
@@ -50,6 +58,12 @@ void main() {
         httpClient: MockClient((request) async {
           final body = jsonDecode(request.body) as Map<String, dynamic>;
           calls.add(Call(request.url.path, body));
+          if (request.url.path == '/api/v1/in-app/feed/placements') {
+            final placements = [
+              for (final key in body['placements'] as List) {'placement': key, 'message': placementItems[key]},
+            ];
+            return http.Response(jsonEncode({'success': true, 'placements': placements}), 200);
+          }
           if (request.url.path == '/api/v1/in-app/feed') {
             // Like the API: push primers only for callers that list the action
             final canAsk = (body['actions'] as List?)?.contains('request_push_permission') ?? false;
@@ -380,5 +394,248 @@ void main() {
     expect(await Sequenzy.handleNotificationReceived(data), isTrue);
     expect(calls.last.body['type'], 'delivered');
     expect(await Sequenzy.handleNotificationOpened({'title': 'Other'}), isFalse);
+  });
+
+  group('SequenzyPlacement', () {
+    Future<SequenzyPlacements> pumpPlacements(WidgetTester tester, List<String> keys) async {
+      await tester.runAsync(() => Sequenzy.identify('jane@example.com', identityToken: 'seq_wid_test'));
+      final placements = SequenzyPlacements();
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: ListView(children: [
+            for (final key in keys) SequenzyPlacement(placementId: key, placements: placements),
+            const Text('Below'),
+          ]),
+        ),
+      ));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await tester.pump();
+      return placements;
+    }
+
+    testWidgets('draws the item inline, collapses empty slots and batches the fetch', (tester) async {
+      await pumpPlacements(tester, ['home_hero', 'checkout_upsell']);
+      final fetches = calls.where((call) => call.path == '/api/v1/in-app/feed/placements').toList();
+      expect(fetches, hasLength(1));
+      expect(fetches.single.body['placements'], ['home_hero', 'checkout_upsell']);
+      expect(find.text('Upgrade to Pro, Jane'), findsOneWidget);
+      expect(find.byKey(const Key('sequenzy-placement-home_hero')), findsOneWidget);
+      expect(find.byKey(const Key('sequenzy-placement-checkout_upsell')), findsNothing);
+      // No unread dot or close control on placement items.
+      expect(find.bySemanticsLabel('Unread'), findsNothing);
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      expect(reports('displayed'), ['iam_placement']);
+    });
+
+    testWidgets('opens links, and on dismiss shows the next item', (tester) async {
+      await pumpPlacements(tester, ['home_hero']);
+      await tester.tap(find.text('See plans'));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      expect(reports('clicked'), ['iam_placement']);
+      expect(opened, ['myapp://billing']);
+
+      placementItems = {
+        'home_hero': {
+          ...((placementsFixture['placements'] as List).first as Map)['message'] as Map<String, dynamic>,
+          'id': 'iam_next',
+          'title': 'Next up',
+          'buttons': <Object>[],
+        },
+      };
+      await tester.tap(find.text('Not now'));
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await tester.pump();
+      expect(reports('dismissed'), ['iam_placement']);
+      expect(find.text('Next up'), findsOneWidget);
+    });
+
+    for (final layout in ['banner', 'hero']) {
+      testWidgets('draws the $layout layout with a filled primary button', (tester) async {
+        final fixture = ((placementsFixture['placements'] as List).first as Map)['message'] as Map<String, dynamic>;
+        placementItems = {
+          'home_hero': {...fixture, 'id': 'iam_$layout', 'layout': layout},
+        };
+        await pumpPlacements(tester, ['home_hero']);
+        expect(find.byKey(Key('sequenzy-placement-item-iam_$layout')), findsOneWidget);
+        final primary = tester.widget<Container>(find.byKey(const Key('sequenzy-placement-primary')));
+        expect((primary.decoration! as BoxDecoration).color, const Color(0xFF4F46E5));
+        final title = tester.widget<Text>(find.text('Upgrade to Pro, Jane'));
+        // A hero draws its text over the image in white.
+        expect(title.style!.color, layout == 'hero' ? const Color(0xFFFFFFFF) : const Color(0xFF111827));
+        await tester.tap(find.text('See plans'));
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+        expect(reports('clicked'), ['iam_$layout']);
+      });
+    }
+
+    testWidgets('empties slots on reset', (tester) async {
+      await pumpPlacements(tester, ['home_hero']);
+      expect(find.text('Upgrade to Pro, Jane'), findsOneWidget);
+      await tester.runAsync(() => Sequenzy.reset());
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.pump();
+      expect(find.text('Upgrade to Pro, Jane'), findsNothing);
+      expect(find.text('Below'), findsOneWidget);
+    });
+
+    testWidgets('resets a failed card image when a new item fills the placement', (tester) async {
+      final placements = await pumpPlacements(tester, ['home_hero']);
+      final image = tester.widget<InAppNetworkImage>(find.byType(InAppNetworkImage));
+      image.onError();
+      await tester.pump();
+      expect(find.byType(InAppNetworkImage), findsNothing);
+      placementItems = {
+        'home_hero': {
+          ...((placementsFixture['placements'] as List).first as Map)['message'] as Map<String, dynamic>,
+          'id': 'iam_new_card',
+        },
+      };
+      placements.refresh();
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+      await tester.pump();
+      expect(find.byType(InAppNetworkImage), findsOneWidget);
+    });
+  });
+
+  group('SequenzyPlacements store', () {
+    final item = InAppMessage.fromJson(((placementsFixture['placements'] as List).first as Map)['message'])!;
+
+    test('keeps content and reports once when the same contact identifies again', () async {
+      final events = StreamController<SequenzyIdentityEvent>.broadcast();
+      final reported = <InAppEventType>[];
+      var fetches = 0;
+      final store = SequenzyPlacements(
+        fetch: (keys) async {
+          fetches++;
+          return {'home_hero': item};
+        },
+        report: (type, _) async {
+          reported.add(type);
+          return true;
+        },
+        identityEvents: events.stream,
+        identifiedEmail: () async => 'jane@example.com',
+      );
+      final seen = <InAppMessage?>[];
+      store.subscribe('home_hero', (state) => seen.add(state.item));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      store.logDisplayed(item);
+      events.add(SequenzyIdentityEvent.identified);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      store.logDisplayed(item);
+      expect(seen.where((entry) => entry == null), isEmpty);
+      expect(fetches, 2);
+      expect(reported, [InAppEventType.displayed]);
+      await events.close();
+    });
+
+    test('forgets cached slots when another contact identifies while nothing is shown', () async {
+      final events = StreamController<SequenzyIdentityEvent>.broadcast();
+      var email = 'jane@example.com';
+      var fetches = 0;
+      final store = SequenzyPlacements(
+        fetch: (keys) async {
+          fetches++;
+          return {'home_hero': item};
+        },
+        report: (_, __) async => true,
+        identityEvents: events.stream,
+        identifiedEmail: () async => email,
+      );
+      final stop = store.subscribe('home_hero', (_) {});
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      stop();
+      email = 'ben@example.com';
+      events.add(SequenzyIdentityEvent.identified);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(store.get('home_hero').item, isNull);
+      store.subscribe('home_hero', (_) {});
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(fetches, 2);
+      await events.close();
+    });
+
+    test('keeps a dismissed item hidden when a racing fetch returns it', () async {
+      final store = SequenzyPlacements(
+        fetch: (keys) async => {'home_hero': item},
+        report: (_, __) async => true,
+        identityEvents: const Stream.empty(),
+        identifiedEmail: () async => 'jane@example.com',
+      );
+      store.subscribe('home_hero', (_) {});
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(store.get('home_hero').item?.id, 'iam_placement');
+      store.dismiss(item);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(store.get('home_hero').item, isNull);
+    });
+
+    test('ignores an older answer that arrives after a newer one', () async {
+      var fetches = 0;
+      final stale = Completer<void>();
+      final message = ((placementsFixture['placements'] as List).first as Map)['message'] as Map<String, dynamic>;
+      final store = SequenzyPlacements(
+        fetch: (keys) async {
+          fetches += 1;
+          if (fetches == 2) {
+            await stale.future;
+            return {'home_hero': item};
+          }
+          return {'home_hero': InAppMessage.fromJson({...message, 'id': 'iam_$fetches'})!};
+        },
+        report: (_, __) async => true,
+        identityEvents: const Stream.empty(),
+        identifiedEmail: () async => 'jane@example.com',
+      );
+      store.subscribe('home_hero', (_) {});
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      // A refresh is in flight with the old winner when the contact dismisses.
+      store.refresh('home_hero');
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      store.dismiss(store.get('home_hero').item!);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(store.get('home_hero').item?.id, 'iam_3');
+      stale.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(store.get('home_hero').item?.id, 'iam_3');
+    });
+
+    test('asks for the next item only after the dismissal is recorded', () async {
+      var fetches = 0;
+      final recorded = Completer<bool>();
+      final store = SequenzyPlacements(
+        fetch: (keys) async {
+          fetches += 1;
+          return {'home_hero': InAppMessage.fromJson({
+              ...((placementsFixture['placements'] as List).first as Map)['message'] as Map<String, dynamic>,
+              'id': 'iam_$fetches',
+            })!};
+        },
+        report: (type, _) => type == InAppEventType.dismissed ? recorded.future : Future.value(true),
+        identityEvents: const Stream.empty(),
+        identifiedEmail: () async => 'jane@example.com',
+      );
+      store.subscribe('home_hero', (_) {});
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      store.dismiss(store.get('home_hero').item!);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      // No refetch while the server may still serve the dismissed item.
+      expect(fetches, 1);
+      recorded.complete(true);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(fetches, 2);
+      expect(store.get('home_hero').item?.id, 'iam_2');
+    });
+  });
+
+  testWidgets('builds an empty slot before Sequenzy is configured', (tester) async {
+    Sequenzy.unconfigure();
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(body: Column(children: [SequenzyPlacement(placementId: 'home_hero', placements: SequenzyPlacements()), const Text('Below')])),
+    ));
+    await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Below'), findsOneWidget);
   });
 }

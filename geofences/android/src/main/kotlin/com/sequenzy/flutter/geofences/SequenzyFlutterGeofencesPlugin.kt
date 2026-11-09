@@ -66,7 +66,12 @@ class SequenzyFlutterGeofencesPlugin :
                 )
                 result.success(null)
             }
-            "setIdentity" -> bridge.setIdentity(context, call.argument("email"), call.argument("identityToken")) { rejected ->
+            "setIdentity" -> bridge.setIdentity(
+                context,
+                call.argument("email"),
+                call.argument("identityToken"),
+                call.argument("externalId"),
+            ) { rejected ->
                 main.post { result.success(rejected) }
             }
             "authorization" -> result.success(bridge.authorization(context))

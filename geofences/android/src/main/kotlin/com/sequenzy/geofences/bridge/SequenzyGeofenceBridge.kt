@@ -91,24 +91,41 @@ object SequenzyGeofenceBridge {
     }
 
     /**
-     * The signed-in contact. Another email (or null) drops everything recorded
-     * for the previous one; a new token for the same email retries what was
-     * held back. [done] receives true when this token was rejected earlier
-     * (possibly while the plugin was not running), so the plugin should ask
-     * the app for a fresh one.
+     * The signed-in contact: an email, the app's own user ID ([externalId],
+     * for users identified with identifyUser), or both. Another contact (or
+     * null) drops everything recorded for the previous one; a new token for
+     * the same contact retries what was held back. [done] receives true when
+     * this token was rejected earlier (possibly while the plugin was not
+     * running), so the plugin should ask the app for a fresh one.
      */
-    fun setIdentity(context: Context, email: String?, identityToken: String?, done: ((Boolean) -> Unit)? = null) {
+    fun setIdentity(
+        context: Context,
+        email: String?,
+        identityToken: String?,
+        externalId: String? = null,
+        done: ((Boolean) -> Unit)? = null,
+    ) {
         val app = context.applicationContext
         executor.execute {
             val previous = identity(app)
-            val next = if (!email.isNullOrEmpty() && !identityToken.isNullOrEmpty()) email to identityToken else null
+            val cleanEmail = email?.takeIf { it.isNotEmpty() }
+            val cleanExternalId = externalId?.takeIf { it.isNotEmpty() }
+            val contact = cleanExternalId?.let { "external $it" } ?: cleanEmail
+            val next = if (contact != null && !identityToken.isNullOrEmpty()) {
+                Identity(contact, cleanEmail, cleanExternalId, identityToken)
+            } else {
+                null
+            }
             val editor = prefs(app).edit()
             if (next == null) {
                 editor.remove(KEY_IDENTITY)
             } else {
-                editor.putString(KEY_IDENTITY, JSONObject().put("email", next.first).put("identityToken", next.second).toString())
+                val json = JSONObject().put("contact", next.contact).put("identityToken", next.token)
+                next.email?.let { json.put("email", it) }
+                next.externalId?.let { json.put("externalId", it) }
+                editor.putString(KEY_IDENTITY, json.toString())
             }
-            if (previous?.first != next?.first) {
+            if (previous?.contact != next?.contact) {
                 synchronized(queueLock) {
                     editor.remove(KEY_QUEUE).remove(KEY_TRANSITIONS).remove(KEY_LAST_FETCH)
                         .putBoolean(KEY_IDENTITY_REJECTED, false).commit()
@@ -118,7 +135,9 @@ object SequenzyGeofenceBridge {
                 if (next != null) refreshLocked(app, force = true)
                 return@execute
             }
-            if (previous?.second != next?.second) {
+            if (previous?.token != next?.token || previous?.email != next?.email ||
+                previous?.externalId != next?.externalId
+            ) {
                 editor.putBoolean(KEY_IDENTITY_REJECTED, false).commit()
                 done?.invoke(false)
                 flushLocked(app)
@@ -281,15 +300,13 @@ object SequenzyGeofenceBridge {
             null
         } ?: return
         val limit = (maxRegions(context) - 1).coerceIn(1, 99)
-        val body = JSONObject()
-            .put("email", identity.first)
-            .put("identityToken", identity.second)
+        val body = identity.fields()
             .put("latitude", Math.round(location.latitude * 100) / 100.0)
             .put("longitude", Math.round(location.longitude * 100) / 100.0)
             .put("limit", limit)
         when (val result = post(context, "/api/v1/geofences/nearby", body)) {
             is Result.Ok -> {
-                if (!isEnabled(context) || identity(context)?.first != identity.first) return
+                if (!isEnabled(context) || identity(context)?.contact != identity.contact) return
                 val list = result.body.optJSONArray("geofences") ?: JSONArray()
                 val planned = mutableListOf<Region>()
                 for (index in 0 until list.length()) {
@@ -412,10 +429,10 @@ object SequenzyGeofenceBridge {
         // waiting on location or the network: the receiver can be finished
         // (and the process killed) before the executor gets to it. Recorded
         // before any re-plan, which may drop these regions.
-        val email = identity(app)?.first
+        val contact = identity(app)?.contact
         val known = registered(app).map { it.id }.toSet()
         val ids = regionIds.filter { it != REFRESH_REGION_ID && known.contains(it) }
-        if (email != null && ids.isNotEmpty()) record(app, email, ids, if (entered) "enter" else "exit", atMillis)
+        if (contact != null && ids.isNotEmpty()) record(app, contact, ids, if (entered) "enter" else "exit", atMillis)
         if (regionIds.contains(REFRESH_REGION_ID) && !entered) {
             // Stale until a fetch succeeds, so a failed one is retried on the
             // next transition, launch or foreground.
@@ -433,7 +450,7 @@ object SequenzyGeofenceBridge {
 
     private fun record(
         context: Context,
-        email: String,
+        contact: String,
         ids: List<String>,
         transition: String,
         atMillis: Long,
@@ -452,7 +469,7 @@ object SequenzyGeofenceBridge {
             recent.put(key, now)
             events.put(
                 JSONObject()
-                    .put("email", email)
+                    .put("contact", contact)
                     .put("type", "geofence")
                     .put("name", "geofence")
                     .put("transition", transition)
@@ -497,7 +514,9 @@ object SequenzyGeofenceBridge {
                     } catch (_: Exception) {
                         0L
                     }
-                    if (event.optString("email") == identity.first && occurredAt > cutoff) fresh.put(event)
+                    // Events queued by an older version carry the email instead.
+                    val eventContact = event.optString("contact").ifEmpty { event.optString("email") }
+                    if (eventContact == identity.contact && occurredAt > cutoff) fresh.put(event)
                 }
                 saveQueue(context, fresh)
             }
@@ -507,13 +526,11 @@ object SequenzyGeofenceBridge {
             for (index in 0 until minOf(MAX_BATCH_SIZE, fresh.length())) {
                 val event = JSONObject(fresh.getJSONObject(index).toString())
                 event.remove("email")
+                event.remove("contact")
                 ids.add(event.optString("eventId"))
                 batch.put(event)
             }
-            val body = JSONObject()
-                .put("email", identity.first)
-                .put("identityToken", identity.second)
-                .put("events", batch)
+            val body = identity.fields().put("events", batch)
             when (val result = post(context, "/api/v1/app-events", body)) {
                 is Result.Ok, is Result.Rejected -> {
                     if (result is Result.Rejected) log("Dropped geofence events: ${result.message}")
@@ -559,11 +576,26 @@ object SequenzyGeofenceBridge {
 
     // region HTTP
 
-    private fun identity(context: Context): Pair<String, String>? {
+    /** [contact] is one string per contact: "external <id>" or the email. */
+    private class Identity(val contact: String, val email: String?, val externalId: String?, val token: String) {
+        /** The identifiers and token every identified request carries. */
+        fun fields(): JSONObject {
+            val json = JSONObject().put("identityToken", token)
+            email?.let { json.put("email", it) }
+            externalId?.let { json.put("externalId", it) }
+            return json
+        }
+    }
+
+    private fun identity(context: Context): Identity? {
         val raw = prefs(context).getString(KEY_IDENTITY, null) ?: return null
         return try {
             val json = JSONObject(raw)
-            json.getString("email") to json.getString("identityToken")
+            val email = json.optString("email").ifEmpty { null }
+            val externalId = json.optString("externalId").ifEmpty { null }
+            // Identities saved by an older version have only the email.
+            val contact = json.optString("contact").ifEmpty { null } ?: email ?: return null
+            Identity(contact, email, externalId, json.getString("identityToken"))
         } catch (_: Exception) {
             null
         }

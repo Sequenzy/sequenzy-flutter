@@ -10,8 +10,8 @@ app is in the background or not running.
 
 ```yaml
 dependencies:
-  sequenzy_flutter: ^0.2.0
-  sequenzy_flutter_geofences: ^0.2.0
+  sequenzy_flutter: ^0.3.0
+  sequenzy_flutter_geofences: ^0.3.0
 ```
 
 iOS 13+: add `NSLocationWhenInUseUsageDescription` and

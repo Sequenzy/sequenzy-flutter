@@ -136,6 +136,7 @@ class InAppType {
   TextStyle cardTitle(Color color) => _style(16, 21, FontWeight.w600, color);
   TextStyle cardBody(Color color) => _style(14, 20, FontWeight.w400, color);
   TextStyle cardLink(Color color) => _style(15, 20, FontWeight.w600, color);
+  TextStyle heroTitle(Color color) => _style(20, 26, FontWeight.w700, color);
 }
 
 /// Caps the system text size at [maxTextScale].

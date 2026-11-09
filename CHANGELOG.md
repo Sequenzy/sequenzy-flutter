@@ -1,3 +1,15 @@
+## 0.3.0
+
+- `identifyUser(externalId, email:, identityToken:)` identifies a user by your
+  own user ID, for users without an email. Set `userIdentityTokenProvider` to
+  renew their tokens. See "Users without an email" in the mobile SDK docs.
+- Breaking: `identityCredentials()` now returns
+  `({String? email, String? externalId, String identityToken})?`; `email` is
+  null for a user identified by external ID only.
+- `contactKey()` and `Sequenzy.identifiedContact()` name the signed-in contact
+  whether it was identified by email or external ID; `SequenzyInAppHost`
+  follows it.
+
 ## 0.2.1
 
 - Fixes and improvements.

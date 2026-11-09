@@ -10,9 +10,13 @@ import 'parts.dart';
 
 /// A content card drawn to mobile-sdks/DESIGN.md.
 class InAppCardView extends StatefulWidget {
-  const InAppCardView({super.key, required this.card, this.onDismiss});
+  const InAppCardView({super.key, required this.card, this.onDismiss, this.placement = false});
 
   final InAppMessage card;
+
+  /// Drawn inline for a placement: no unread dot, pin or close control
+  /// ([SequenzyPlacement] sets this).
+  final bool placement;
 
   /// Handles the dismiss button. Pass [InAppCardsController.dismiss], which
   /// reports the dismissal and drops the card; without it the card reports it.
@@ -54,7 +58,7 @@ class _InAppCardViewState extends State<InAppCardView> {
     return withTextScaleCap(
       context,
       Container(
-        key: Key('sequenzy-card-${card.id}'),
+        key: Key('sequenzy-${widget.placement ? 'placement-item' : 'card'}-${card.id}'),
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
           color: style.background,
@@ -78,7 +82,7 @@ class _InAppCardViewState extends State<InAppCardView> {
                   child: Text(eyebrow, style: type.cardEyebrow(palette.eyebrow)),
                 ),
               Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                if (!card.isRead)
+                if (!widget.placement && !card.isRead)
                   Padding(
                     padding: const EdgeInsets.only(top: 6.5, right: 8),
                     child: Semantics(
@@ -91,8 +95,8 @@ class _InAppCardViewState extends State<InAppCardView> {
                     ),
                   ),
                 Expanded(child: Text(card.title, style: type.cardTitle(palette.text))),
-                if (card.pinned) PinGlyph(color: palette.muted),
-                CompactCloseButton(palette: palette, size: 24, onPressed: dismiss),
+                if (!widget.placement && card.pinned) PinGlyph(color: palette.muted),
+                if (!widget.placement) CompactCloseButton(palette: palette, size: 24, onPressed: dismiss),
               ]),
               if (card.body.isNotEmpty)
                 Padding(

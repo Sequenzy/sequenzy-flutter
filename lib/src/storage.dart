@@ -6,6 +6,13 @@ abstract class SequenzyStore {
   Future<void> setString(String key, String? value);
 }
 
+/// A store another isolate can write to, such as firebase_messaging's
+/// background handler on Android: [reload] drops values cached in this
+/// isolate, so Live Update state written there is seen here.
+abstract class ReloadableSequenzyStore implements SequenzyStore {
+  Future<void> reload();
+}
+
 class MemoryStore implements SequenzyStore {
   MemoryStore([Map<String, String>? initial]) : values = {...?initial};
 
@@ -25,7 +32,7 @@ class MemoryStore implements SequenzyStore {
 }
 
 /// SharedPreferences with every key prefixed by `sequenzy.`.
-class SharedPreferencesStore implements SequenzyStore {
+class SharedPreferencesStore implements ReloadableSequenzyStore {
   SharedPreferencesStore({this.prefix = 'sequenzy.'});
 
   final String prefix;
@@ -35,6 +42,9 @@ class SharedPreferencesStore implements SequenzyStore {
 
   @override
   Future<String?> getString(String key) async => (await _instance).getString(prefix + key);
+
+  @override
+  Future<void> reload() async => (await _instance).reload();
 
   @override
   Future<void> setString(String key, String? value) async {

@@ -1,3 +1,8 @@
+## 0.3.0
+
+- Watches places for users identified with `identifyUser` (external ID) too.
+  Requires `sequenzy_flutter` 0.3.0.
+
 ## 0.2.1
 
 - Fixes and improvements.

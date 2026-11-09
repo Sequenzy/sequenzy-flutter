@@ -81,20 +81,29 @@
             defaults.set(config, forKey: Key.config)
         }
 
-        /// The signed-in contact. Another email (or nil) drops everything
-        /// recorded for the previous one; a new token for the same email
-        /// retries what was held back. Returns true when this token was
-        /// rejected earlier (possibly while the plugin was not running), so
-        /// the plugin should ask the app for a fresh one.
+        /// The signed-in contact: an email, the app's own user ID
+        /// (`externalId`, for users identified with identifyUser), or both.
+        /// Another contact (or nil) drops everything recorded for the previous
+        /// one; a new token for the same contact retries what was held back.
+        /// Returns true when this token was rejected earlier (possibly while
+        /// the plugin was not running), so the plugin should ask the app for a
+        /// fresh one.
         @discardableResult
-        public func setIdentity(email: String?, identityToken: String?) -> Bool {
+        public func setIdentity(email: String?, identityToken: String?, externalId: String? = nil) -> Bool {
             let previous = identity
-            let next = email.flatMap { email -> [String: String]? in
-                guard !email.isEmpty, let token = identityToken, !token.isEmpty else { return nil }
-                return ["email": email, "identityToken": token]
+            var next: [String: String]?
+            if let token = identityToken, !token.isEmpty {
+                let email = email.flatMap { $0.isEmpty ? nil : $0 }
+                let externalId = externalId.flatMap { $0.isEmpty ? nil : $0 }
+                if let contact = externalId.map({ "external \($0)" }) ?? email {
+                    var entry = ["contact": contact, "identityToken": token]
+                    entry["email"] = email
+                    entry["externalId"] = externalId
+                    next = entry
+                }
             }
             if let next { defaults.set(next, forKey: Key.identity) } else { defaults.removeObject(forKey: Key.identity) }
-            if previous?["email"] != next?["email"] {
+            if Self.contact(of: previous) != Self.contact(of: next) {
                 defaults.removeObject(forKey: Key.queue)
                 defaults.removeObject(forKey: Key.transitions)
                 defaults.removeObject(forKey: Key.lastFetch)
@@ -103,7 +112,9 @@
                 if next != nil { refresh(force: true) }
                 return false
             }
-            if previous?["identityToken"] != next?["identityToken"] {
+            if previous?["identityToken"] != next?["identityToken"]
+                || previous?["email"] != next?["email"] || previous?["externalId"] != next?["externalId"]
+            {
                 defaults.set(false, forKey: Key.identityRejected)
                 flush()
                 if isStale { refresh() }
@@ -252,20 +263,17 @@
         }
 
         private func fetch(latitude: Double, longitude: Double, done: @escaping () -> Void) {
-            guard isEnabled, let identity = identity, let email = identity["email"] else { return done() }
+            guard isEnabled, let identity = identity, let contact = Self.contact(of: identity) else { return done() }
             let token = identity["identityToken"]
             let limit = max(1, min(99, maxRegions - 1))
-            let body: [String: Any] = [
-                "email": email,
-                "identityToken": identity["identityToken"] ?? "",
-                "latitude": (latitude * 100).rounded() / 100,
-                "longitude": (longitude * 100).rounded() / 100,
-                "limit": limit,
-            ]
+            var body = Self.identityFields(identity)
+            body["latitude"] = (latitude * 100).rounded() / 100
+            body["longitude"] = (longitude * 100).rounded() / 100
+            body["limit"] = limit
             post("/api/v1/geofences/nearby", body) { [weak self] result in
                 guard let self else { return done() }
                 defer { done() }
-                guard self.isEnabled, self.identity?["email"] == email else { return }
+                guard self.isEnabled, Self.contact(of: self.identity) == contact else { return }
                 switch result {
                 case .ok(let json):
                     let list = (json["geofences"] as? [[String: Any]]) ?? []
@@ -304,7 +312,9 @@
                 }
                 return
             }
-            guard registered.contains(where: { $0.id == regionId }), let email = identity?["email"] else { return }
+            guard registered.contains(where: { $0.id == regionId }), let contact = Self.contact(of: identity) else {
+                return
+            }
             let transition = entered ? "enter" : "exit"
             let now = Date()
             var recent = (defaults.dictionary(forKey: Key.transitions) as? [String: Double]) ?? [:]
@@ -318,7 +328,7 @@
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             var events = queue
             events.append([
-                "email": email,
+                "contact": contact,
                 "type": "geofence",
                 "name": "geofence",
                 "transition": transition,
@@ -353,14 +363,16 @@
         /// Sends queued transitions in batches. Retryable failures keep them
         /// for the next region event or app launch.
         public func flush(_ done: (() -> Void)? = nil) {
-            guard !flushing, let identity = identity, let email = identity["email"],
+            guard !flushing, let identity = identity, let contact = Self.contact(of: identity),
                 !defaults.bool(forKey: Key.identityRejected)
             else { done?(); return }
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             let cutoff = Date().addingTimeInterval(-Self.maxEventAge)
             let fresh = queue.filter { event in
-                guard event["email"] as? String == email, let occurredAt = event["occurredAt"] as? String,
+                // Events queued by an older version carry the email instead.
+                guard (event["contact"] ?? event["email"]) as? String == contact,
+                    let occurredAt = event["occurredAt"] as? String,
                     let date = formatter.date(from: occurredAt)
                 else { return false }
                 return date > cutoff
@@ -369,12 +381,11 @@
             guard !fresh.isEmpty else { done?(); return }
             let batch = Array(fresh.prefix(Self.maxBatchSize))
             let ids = Set(batch.compactMap { $0["eventId"] as? String })
-            let events = batch.map { event in event.filter { $0.key != "email" } }
+            let events = batch.map { event in event.filter { $0.key != "email" && $0.key != "contact" } }
             flushing = true
-            post(
-                "/api/v1/app-events",
-                ["email": email, "identityToken": identity["identityToken"] ?? "", "events": events]
-            ) { [weak self] result in
+            var body = Self.identityFields(identity)
+            body["events"] = events
+            post("/api/v1/app-events", body) { [weak self] result in
                 guard let self else { done?(); return }
                 self.flushing = false
                 switch result {
@@ -404,6 +415,20 @@
         // MARK: HTTP
 
         private var identity: [String: String]? { defaults.dictionary(forKey: Key.identity) as? [String: String] }
+
+        /// One string per contact; identities saved by an older version have
+        /// only the email.
+        private static func contact(of identity: [String: String]?) -> String? {
+            identity.flatMap { $0["contact"] ?? $0["email"] }
+        }
+
+        /// The identifiers and token every identified request carries.
+        private static func identityFields(_ identity: [String: String]) -> [String: Any] {
+            var fields: [String: Any] = ["identityToken": identity["identityToken"] ?? ""]
+            if let email = identity["email"] { fields["email"] = email }
+            if let externalId = identity["externalId"] { fields["externalId"] = externalId }
+            return fields
+        }
 
         private enum Result {
             case ok([String: Any])

@@ -7,10 +7,11 @@ import 'package:http/http.dart' as http;
 
 import 'geofences.dart';
 import 'in_app_html.dart';
+import 'live_updates.dart';
 import 'models.dart';
 import 'storage.dart';
 
-const sequenzySdkVersion = '0.2.1';
+const sequenzySdkVersion = '0.3.0';
 const defaultApiBaseUrl = 'https://api.sequenzy.com';
 
 enum SequenzyLogLevel { none, error, info, debug }
@@ -20,6 +21,11 @@ typedef SequenzyLogger = void Function(SequenzyLogLevel level, String message);
 /// Asks the host app's backend for a fresh identity token for [email].
 typedef IdentityTokenProvider = Future<String> Function(String email);
 
+/// Asks the host app's backend for a fresh identity token for a user
+/// identified with `identifyUser`: mint it for [externalId], plus [email]
+/// when it is set.
+typedef UserIdentityTokenProvider = Future<String> Function(String externalId, String? email);
+
 class SequenzyConfig {
   const SequenzyConfig({
     required this.publicKey,
@@ -28,6 +34,7 @@ class SequenzyConfig {
     required this.platform,
     this.apiBaseUrl = defaultApiBaseUrl,
     this.identityTokenProvider,
+    this.userIdentityTokenProvider,
     this.logLevel = SequenzyLogLevel.error,
     this.appVersion,
     this.osVersion,
@@ -35,6 +42,7 @@ class SequenzyConfig {
     this.locale,
     this.timezone,
     this.pushPermission,
+    this.onLiveUpdatesRemoved,
   });
 
   /// Publishable key (`seq_pk_...`) restricted to your app IDs.
@@ -48,6 +56,7 @@ class SequenzyConfig {
   final String platform;
   final String apiBaseUrl;
   final IdentityTokenProvider? identityTokenProvider;
+  final UserIdentityTokenProvider? userIdentityTokenProvider;
   final SequenzyLogLevel logLevel;
   final String? appVersion;
   final String? osVersion;
@@ -60,6 +69,11 @@ class SequenzyConfig {
   /// `pushPermission` attribute) and shows push primers: in-app messages
   /// whose button asks for permission.
   final SequenzyPushPermission? pushPermission;
+
+  /// Android Live Updates: called with the activity ids whose notifications
+  /// to remove, after [SequenzyClient.reset] or when another person signs
+  /// in. Cancel them in your notification plugin.
+  final void Function(List<String> activityIds)? onLiveUpdatesRemoved;
 }
 
 class SequenzyException implements Exception {
@@ -164,9 +178,13 @@ class SequenzyClient {
         _timer = timer ?? Timer.new,
         _logger = logger ?? ((level, message) => debugPrint('[Sequenzy] ${level.name}: $message')),
         identityTokenProvider = config.identityTokenProvider,
+        userIdentityTokenProvider = config.userIdentityTokenProvider,
         logLevel = config.logLevel;
 
   static const maxQueuedEvents = 100;
+
+  /// Server limit for an external ID (the contact's `externalId`).
+  static const maxExternalIdLength = 255;
   static const maxBatchSize = 20;
   static const maxEventAge = Duration(hours: 24);
   static const pushRefreshInterval = Duration(hours: 24);
@@ -180,6 +198,7 @@ class SequenzyClient {
 
   final SequenzyConfig config;
   IdentityTokenProvider? identityTokenProvider;
+  UserIdentityTokenProvider? userIdentityTokenProvider;
   SequenzyLogLevel logLevel;
 
   final SequenzyStore _store;
@@ -194,10 +213,16 @@ class SequenzyClient {
   List<_QueuedEvent> _events = [];
   String? _anonymousId;
   String? _email;
+
+  /// Set by identifyUser: the app's own user ID.
+  String? _externalId;
   String? _identityToken;
   String? _pushToken;
   Map<String, Object?>? _pushRegistration;
   List<LiveActivityToken> _liveActivityTokens = [];
+
+  /// Android Live Updates this device shows or showed.
+  List<LiveUpdateRecord> _liveUpdates = [];
 
   /// Stored ActivityKit tokens; the newest are kept.
   static const maxLiveActivityTokens = 32;
@@ -234,6 +259,7 @@ class SequenzyClient {
     // the next write would persist over the saved queue and identity.
     _anonymousId = await _store.getString('anonymousId');
     _email = await _store.getString('email');
+    _externalId = await _store.getString('externalId');
     _identityToken = await _store.getString('identityToken');
     _pushToken = await _store.getString('pushToken');
     _pushRegistration = _decodeObject(await _store.getString('pushRegistration'));
@@ -247,6 +273,17 @@ class SequenzyClient {
         }
       } catch (_) {
         _liveActivityTokens = [];
+      }
+    }
+    final liveUpdates = await _store.getString('liveUpdates');
+    if (liveUpdates != null) {
+      try {
+        final decoded = jsonDecode(liveUpdates);
+        if (decoded is List) {
+          _liveUpdates = decoded.map(LiveUpdateRecord.fromJson).whereType<LiveUpdateRecord>().toList();
+        }
+      } catch (_) {
+        _liveUpdates = [];
       }
     }
     final raw = await _store.getString('events');
@@ -280,57 +317,123 @@ class SequenzyClient {
 
   Future<String?> email() => _run(() async => _email);
 
+  /// The user ID passed to identifyUser, or null.
+  Future<String?> externalId() => _run(() async => _externalId);
+
+  /// One string per signed-in contact (the external ID or the email), or
+  /// null while anonymous: compare it to notice that another user signed in.
+  Future<String?> contactKey() => _run(() async => _identityKey);
+
   Future<int> queuedEventCount() => _run(() async => _events.length);
 
-  /// Links this installation to a contact.
+  /// One string per contact: the external ID when the app identified the
+  /// user by it, otherwise the email. Null while anonymous. The space keeps
+  /// an external ID from ever equalling an email.
+  String? get _identityKey {
+    final externalId = _externalId;
+    return externalId != null ? 'external $externalId' : _email;
+  }
+
+  Map<String, Object?> get _identityFields => {
+        if (_email != null) 'email': _email,
+        if (_externalId != null) 'externalId': _externalId,
+      };
+
+  /// Links this installation to the contact with this email.
   Future<void> identify(String email, {String? identityToken}) => _run(() async {
         final normalized = email.trim().toLowerCase();
         if (!normalized.contains('@') || normalized.contains(RegExp(r'\s'))) {
           _log(SequenzyLogLevel.error, 'identify was called with an invalid email address');
           return;
         }
-        final previous = _email;
-        if (previous != normalized) {
-          if (previous != null) {
-            // Events and profile changes queued for the previous user must
-            // not be sent as the new one.
-            _events = [];
-            _pendingProfile = null;
-            await _persistEvents();
-            await _store.setString('profile', null);
-          }
-          _email = normalized;
-          _identityToken = null;
-          await _store.setString('email', normalized);
-          await _store.setString('identityToken', null);
-          // Another contact's recent geofence transitions must not suppress this one's.
-          await _store.setString('geofenceTransitions', null);
-        }
-        if (identityToken != null && identityToken.isNotEmpty) {
-          _identityToken = identityToken;
-          await _store.setString('identityToken', identityToken);
-        }
-        _identityBlocked = false;
-        _providerRetryAt = null;
-        await _registerPush(force: previous != normalized);
-        if (previous != normalized) {
-          if (previous != null) {
-            // Another user signed in without reset: the previous user's
-            // running activities stay theirs, and only the device's
-            // push-to-start tokens move to the new contact.
-            _liveActivityTokens = _liveActivityTokens.where((token) => token.kind == 'push_to_start').toList();
-            await _persistLiveActivityTokens();
-          }
-          // Stored ActivityKit tokens link to the contact.
-          for (final token in _liveActivityTokens) {
-            await _sendLiveActivityToken(token);
-          }
-        }
-        await _flush();
+        await _identifyLocked(email: normalized, externalId: null, identityToken: identityToken);
       });
+
+  /// Links this installation to the contact with your own user ID, for users
+  /// without an email (Sign in with Apple with a hidden address, phone
+  /// login). Pass [email] too when you have it. The identity token must be
+  /// minted for exactly these identifiers.
+  Future<void> identifyUser(String externalId, {String? email, String? identityToken}) => _run(() async {
+        final id = externalId.trim();
+        if (id.isEmpty || id.length > maxExternalIdLength) {
+          _log(SequenzyLogLevel.error, 'identifyUser needs a user ID of 1 to $maxExternalIdLength characters');
+          return;
+        }
+        String? normalizedEmail;
+        if (email != null && email.trim().isNotEmpty) {
+          normalizedEmail = email.trim().toLowerCase();
+          if (!normalizedEmail.contains('@') || normalizedEmail.contains(RegExp(r'\s'))) {
+            _log(SequenzyLogLevel.error, 'identifyUser was called with an invalid email address');
+            return;
+          }
+        }
+        await _identifyLocked(email: normalizedEmail, externalId: id, identityToken: identityToken);
+      });
+
+  Future<void> _identifyLocked({
+    required String? email,
+    required String? externalId,
+    required String? identityToken,
+  }) async {
+    final previous = _identityKey;
+    final nextKey = externalId != null ? 'external $externalId' : email;
+    final identifiersChanged = _email != email || _externalId != externalId;
+    final contactChanged = previous != nextKey;
+    if (previous != null && contactChanged) {
+      // Events and profile changes queued for the previous user must
+      // not be sent as the new one.
+      _events = [];
+      _pendingProfile = null;
+      await _persistEvents();
+      await _store.setString('profile', null);
+      // Another user signed in without reset: the previous user's
+      // running activities stay theirs, and only the device's
+      // push-to-start tokens move to the new contact. Done before the
+      // device registration below, which links Android tokens again.
+      // Android unlinks them on the server first, as reset does.
+      if (config.platform == 'android') {
+        await _reloadLiveState();
+        for (final liveToken in _liveActivityTokens) {
+          await _removeLiveActivityToken(liveToken.token, unlinkSubscriber: true);
+        }
+      }
+      _liveActivityTokens = _liveActivityTokens.where((token) => token.kind == 'push_to_start').toList();
+      await _persistLiveActivityTokens();
+      await _clearLiveUpdates();
+    }
+    if (identifiersChanged) {
+      // A token verifies only with the exact identifiers it was minted for.
+      _email = email;
+      _externalId = externalId;
+      _identityToken = null;
+      await _store.setString('email', email);
+      await _store.setString('externalId', externalId);
+      await _store.setString('identityToken', null);
+    }
+    if (contactChanged) {
+      // Another contact's recent geofence transitions must not suppress this one's.
+      await _store.setString('geofenceTransitions', null);
+    }
+    if (identityToken != null && identityToken.isNotEmpty) {
+      _identityToken = identityToken;
+      await _store.setString('identityToken', identityToken);
+    }
+    _identityBlocked = false;
+    _providerRetryAt = null;
+    await _registerPush(force: identifiersChanged);
+    // Stored ActivityKit tokens link to the contact. Android sends its
+    // Live Update tokens after the device registration above instead.
+    if (identifiersChanged && config.platform != 'android') {
+      for (final token in _liveActivityTokens) {
+        await _sendLiveActivityToken(token);
+      }
+    }
+    await _flush();
+  }
 
   /// Forgets the user: unregisters the push token and clears identity, queue and anonymous id.
   Future<void> reset() => _run(() async {
+        if (config.platform == 'android') await _reloadLiveState();
         final token = _pushToken;
         if (token != null && _pushPlatform) {
           try {
@@ -356,6 +459,7 @@ class SequenzyClient {
         _liveActivityTokens = liveTokens.where((liveToken) => liveToken.kind == 'push_to_start').toList();
         await _persistLiveActivityTokens();
         _email = null;
+        _externalId = null;
         _identityToken = null;
         _pushRegistration = null;
         _anonymousId = _uuid();
@@ -364,6 +468,7 @@ class SequenzyClient {
         await _store.setString('profile', null);
         await _store.setString('geofenceTransitions', null);
         await _store.setString('email', null);
+        await _store.setString('externalId', null);
         await _store.setString('identityToken', null);
         await _store.setString('pushRegistration', null);
         await _store.setString('anonymousId', _anonymousId);
@@ -373,8 +478,13 @@ class SequenzyClient {
         _backoff = Duration.zero;
         _nextAttemptAt = null;
         _identityBlocked = false;
-        for (final liveToken in _liveActivityTokens) {
-          await _sendLiveActivityToken(liveToken);
+        await _clearLiveUpdates();
+        // Android links its Live Update tokens again with the next device
+        // registration: the device was just unregistered.
+        if (config.platform != 'android') {
+          for (final liveToken in _liveActivityTokens) {
+            await _sendLiveActivityToken(liveToken);
+          }
         }
       });
 
@@ -507,7 +617,7 @@ class SequenzyClient {
   Future<void> _flush() async {
     final profile = _pendingProfile;
     if (profile != null) {
-      if (_email == null || _identityBlocked) return;
+      if (_identityKey == null || _identityBlocked) return;
       final next = _nextAttemptAt;
       if (next != null && next.isAfter(_now())) return;
       final outcome = await _sendProfile(profile);
@@ -523,7 +633,7 @@ class SequenzyClient {
     }
     await _dropStaleEvents();
     while (_events.isNotEmpty) {
-      if (_email == null || _identityBlocked) return;
+      if (_identityKey == null || _identityBlocked) return;
       final next = _nextAttemptAt;
       if (next != null && next.isAfter(_now())) return;
       final batch = _events.take(maxBatchSize).toList();
@@ -545,10 +655,10 @@ class SequenzyClient {
   }
 
   Future<String> _sendBatch(List<_QueuedEvent> batch) async {
-    final result = await _withIdentity((email, token) => _post('/api/v1/app-events', {
+    final result = await _withIdentity((identity, token) => _post('/api/v1/app-events', {
           'companyId': config.companyId,
           'publicKey': config.publicKey,
-          'email': email,
+          ...identity,
           'identityToken': token,
           'events': batch.map((event) => event.toJson()).toList(),
         }));
@@ -575,10 +685,10 @@ class SequenzyClient {
   }
 
   Future<String> _sendProfile(Map<String, Object?> profile) async {
-    final result = await _withIdentity((email, token) => _post('/api/v1/app-attributes', {
+    final result = await _withIdentity((identity, token) => _post('/api/v1/app-attributes', {
           'companyId': config.companyId,
           'publicKey': config.publicKey,
-          'email': email,
+          ...identity,
           'identityToken': token,
           ...profile,
         }));
@@ -676,7 +786,7 @@ class SequenzyClient {
   Future<void> _registerPush({required bool force}) async {
     final token = _pushToken;
     if (token == null || !_pushPlatform) return;
-    final identity = _email ?? '';
+    final identity = _identityKey ?? '';
     final permission = await _readPushPermission();
     final last = _pushRegistration;
     final lastAt = last?['registeredAt'];
@@ -705,9 +815,9 @@ class SequenzyClient {
     };
 
     _Response? response;
-    if (_email != null) {
-      final result = await _withIdentity((email, identityToken) =>
-          _post('/api/v1/push/app-devices', {...base, 'email': email, 'identityToken': identityToken}));
+    if (_identityKey != null) {
+      final result = await _withIdentity((fields, identityToken) =>
+          _post('/api/v1/push/app-devices', {...base, ...fields, 'identityToken': identityToken}));
       switch (result) {
         case _IdentifiedResponse(response: final identified):
           response = identified;
@@ -737,6 +847,13 @@ class SequenzyClient {
     if (response.body?['pushConfigured'] == false) {
       _log(SequenzyLogLevel.info,
           'Device registered, but ${config.platform} push credentials are not set up in Sequenzy yet');
+    }
+    // Android Live Update tokens are sent to this FCM token and contact:
+    // link them again whenever either may have changed.
+    if (config.platform == 'android') {
+      for (final liveToken in _liveActivityTokens) {
+        await _sendLiveActivityToken(liveToken);
+      }
     }
   }
 
@@ -782,8 +899,8 @@ class SequenzyClient {
   /// `sequenzy.activityId`. A newer token for the same type or activity
   /// replaces the stored one.
   Future<void> registerLiveActivityToken(LiveActivityToken token) => _run(() async {
-        if (config.platform != 'ios') {
-          _log(SequenzyLogLevel.error, 'Live Activities are only available on iOS');
+        if (!_pushPlatform) {
+          _log(SequenzyLogLevel.error, 'Live Activities are only available in apps');
           return;
         }
         if (!token.isValid) {
@@ -815,9 +932,14 @@ class SequenzyClient {
 
   Future<void> _sendLiveActivityToken(LiveActivityToken token) async {
     const path = '/api/v1/push/live-activities';
+    final android = config.platform == 'android';
+    // Sequenzy sends Android Live Updates to the FCM token; without one
+    // there is nothing to link, and the device registration sends it later.
+    if (android && _pushToken == null) return;
     final base = <String, Object?>{
       'companyId': config.companyId,
       'publicKey': config.publicKey,
+      if (android) 'platform': 'android',
       ...token.toJson(),
       'anonymousId': await _ensureAnonymousId(),
       // Links the token to this installation's push device, when there is one.
@@ -826,9 +948,9 @@ class SequenzyClient {
       if (config.osVersion?.isNotEmpty == true) 'osVersion': config.osVersion,
     };
     _Response? response;
-    if (_email != null) {
+    if (_identityKey != null) {
       final result = await _withIdentity(
-          (email, identityToken) => _post(path, {...base, 'email': email, 'identityToken': identityToken}));
+          (identity, identityToken) => _post(path, {...base, ...identity, 'identityToken': identityToken}));
       switch (result) {
         case _IdentifiedResponse(response: final identified):
           response = identified;
@@ -848,6 +970,169 @@ class SequenzyClient {
           'Live Activity token registration failed: HTTP ${response.status} ${_error(response)}');
     }
   }
+
+  // region Android Live Updates (rules in live_updates.dart)
+
+  /// Android: reports that this device draws Live Updates of [activityType]
+  /// (use your iOS ActivityAttributes type name, so one backend call reaches
+  /// both), with a push-to-start token generated once per type.
+  Future<void> observeLiveUpdates(String activityType) => _runLive(() async {
+        if (!_requireAndroid('observeLiveUpdates')) return;
+        LiveActivityToken? existing;
+        for (final token in _liveActivityTokens) {
+          if (token.kind == 'push_to_start' && token.activityType == activityType) existing = token;
+        }
+        final token = existing ?? LiveActivityToken.pushToStart(activityType: activityType, token: _newLiveUpdateToken());
+        if (!token.isValid) {
+          _log(SequenzyLogLevel.error, 'observeLiveUpdates: "$activityType" is not a valid type name');
+          return;
+        }
+        // A known token is linked again with every device registration.
+        if (existing != null) return;
+        _liveActivityTokens = _capTokens([..._liveActivityTokens, token]);
+        await _persistLiveActivityTokens();
+        await _sendLiveActivityToken(token);
+      });
+
+  /// Android: applies a Sequenzy Live Update push (`RemoteMessage.data`) and
+  /// says what to show. Returns null for other messages. Pass [canShow]
+  /// false when the app does not draw this type or may not post
+  /// notifications: Sequenzy then stops counting the activity as running.
+  Future<LiveUpdateDecision?> handleLiveUpdate(Map<dynamic, dynamic> data, {bool canShow = true}) => _runLive(() async {
+        final payload = LiveUpdatePayload.fromData(data);
+        if (payload == null) return null;
+        return _applyLiveUpdateStep(
+            receiveLiveUpdate(_liveUpdates, payload, canShow: canShow, now: _now(), newToken: _newLiveUpdateToken));
+      });
+
+  /// Android: starts an activity from the app, so your backend can update and end it by [activityId].
+  Future<LiveUpdateDecision> startLiveUpdate({
+    required String activityType,
+    required String activityId,
+    Map<String, Object?> attributes = const {},
+    Map<String, Object?> contentState = const {},
+  }) =>
+      _runLive(() async {
+        if (!_requireAndroid('startLiveUpdate')) return const LiveUpdateDecision.ignore('invalid');
+        return _applyLiveUpdateStep(startLiveUpdateLocally(_liveUpdates,
+            activityType: activityType,
+            activityId: activityId,
+            attributes: attributes,
+            contentState: contentState,
+            now: _now(),
+            newToken: _newLiveUpdateToken));
+      });
+
+  /// Android: updates a running activity from the app.
+  Future<LiveUpdateDecision> updateLiveUpdate(String activityId, Map<String, Object?> contentState) =>
+      _runLive(() async => _applyLiveUpdateStep(updateLiveUpdateLocally(_liveUpdates, activityId, contentState, _now())));
+
+  /// Android: ends a running activity from the app and tells Sequenzy, so
+  /// later backend updates are not sent. Without [dismissAt] the final
+  /// content stays up to four hours, as on iOS.
+  Future<LiveUpdateDecision> endLiveUpdate(String activityId, {Map<String, Object?>? contentState, DateTime? dismissAt}) =>
+      _runLive(() async => _applyLiveUpdateStep(
+          endLiveUpdateLocally(_liveUpdates, activityId, _now(), contentState: contentState, dismissAt: dismissAt)));
+
+  /// Android: call when the person swipes a Live Update away.
+  Future<void> liveUpdateDismissed(String activityId) =>
+      _runLive(() async => _applyLiveUpdateStep(dismissLiveUpdate(_liveUpdates, activityId)));
+
+  /// Android: the Live Updates this device shows now.
+  Future<List<LiveUpdateActivity>> liveUpdates() => _runLive(
+      () async => _liveUpdates.where((record) => record.state == 'active').map((record) => record.toActivity()).toList());
+
+  bool _requireAndroid(String method) {
+    if (config.platform == 'android') return true;
+    _log(SequenzyLogLevel.error, '$method is for Android Live Updates; on iOS use Live Activities');
+    return false;
+  }
+
+  /// 64 random hex characters.
+  String _newLiveUpdateToken() => '${_uuid()}${_uuid()}'.replaceAll('-', '').toLowerCase();
+
+  /// Runs a Live Update operation on the stored state: on Android,
+  /// firebase_messaging's background handler runs in another isolate with
+  /// its own client, and both write the same keys.
+  Future<T> _runLive<T>(Future<T> Function() operation) => _run(() async {
+        await _reloadLiveState();
+        return operation();
+      });
+
+  Future<void> _reloadLiveState() async {
+    final store = _store;
+    if (store is! ReloadableSequenzyStore) return;
+    try {
+      await store.reload();
+    } catch (error) {
+      _log(SequenzyLogLevel.info, 'Could not reload stored Live Update state: $error');
+      return;
+    }
+    _liveActivityTokens = _decodeList(await store.getString('liveActivityTokens'), LiveActivityToken.fromJson);
+    _liveUpdates = _decodeList(await store.getString('liveUpdates'), LiveUpdateRecord.fromJson);
+  }
+
+  static List<T> _decodeList<T>(String? raw, T? Function(Object?) parse) {
+    if (raw == null) return [];
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is List ? decoded.map(parse).whereType<T>().toList() : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Oldest update tokens go first; push-to-start tokens are kept.
+  List<LiveActivityToken> _capTokens(List<LiveActivityToken> tokens) {
+    if (tokens.length <= maxLiveActivityTokens) return tokens;
+    final starts = tokens.where((token) => token.kind == 'push_to_start').toList();
+    final updates = tokens.where((token) => token.kind != 'push_to_start').toList();
+    final room = (maxLiveActivityTokens - starts.length).clamp(0, updates.length);
+    return [
+      ...(starts.length > maxLiveActivityTokens ? starts.sublist(starts.length - maxLiveActivityTokens) : starts),
+      ...updates.sublist(updates.length - room),
+    ];
+  }
+
+  Future<LiveUpdateDecision> _applyLiveUpdateStep(LiveUpdateStep step) async {
+    _liveUpdates = step.records;
+    await _store.setString('liveUpdates', jsonEncode(step.records.map((record) => record.toJson()).toList()));
+    final drop = {if (step.forget != null) step.forget!, if (step.remove != null) step.remove!};
+    if (drop.isNotEmpty) {
+      _liveActivityTokens = _liveActivityTokens.where((stored) => !drop.contains(stored.token)).toList();
+      await _persistLiveActivityTokens();
+    }
+    if (step.remove != null) await _removeLiveActivityToken(step.remove!, unlinkSubscriber: false);
+    final register = step.register;
+    if (register != null) {
+      final token = LiveActivityToken.update(
+          activityType: register.activityType, activityId: register.activityId, token: register.token);
+      if (token.isValid) {
+        _liveActivityTokens = _capTokens([..._liveActivityTokens.where((stored) => !token.replaces(stored)), token]);
+        await _persistLiveActivityTokens();
+        await _sendLiveActivityToken(token);
+      }
+    }
+    return step.decision;
+  }
+
+  /// Forgets every Live Update and asks the app to remove those still showing, running or ended.
+  Future<void> _clearLiveUpdates() async {
+    final running = _liveUpdates
+        .where((record) => record.state != 'dismissed' && record.token.isNotEmpty)
+        .map((record) => record.activityId)
+        .toList();
+    _liveUpdates = [];
+    await _store.setString('liveUpdates', null);
+    if (running.isEmpty) return;
+    try {
+      config.onLiveUpdatesRemoved?.call(running);
+    } catch (error) {
+      _log(SequenzyLogLevel.error, 'onLiveUpdatesRemoved threw: $error');
+    }
+  }
+
+  // endregion
 
   Future<void> _removeLiveActivityToken(String token, {required bool unlinkSubscriber}) async {
     final response = await _tryPost('/api/v1/push/live-activities/remove', {
@@ -890,10 +1175,10 @@ class SequenzyClient {
   /// [formats] lists the message formats the caller renders; null means the
   /// native formats, so `html` messages arrive only when listed.
   Future<List<InAppMessage>> fetchFeed({String? kind, int? limit, List<String>? formats}) => _run(() async {
-        final result = await _withIdentity((email, token) => _post('/api/v1/in-app/feed', {
+        final result = await _withIdentity((identity, token) => _post('/api/v1/in-app/feed', {
               'companyId': config.companyId,
               'publicKey': config.publicKey,
-              'email': email,
+              ...identity,
               'identityToken': token,
               if (kind != null) 'kind': kind,
               if (limit != null) 'limit': limit,
@@ -903,7 +1188,7 @@ class SequenzyClient {
             }));
         switch (result) {
           case _NotIdentified():
-            throw SequenzyException('Call identify(email, identityToken: ...) first', 'not_identified');
+            throw SequenzyException('Call identify or identifyUser with an identity token first', 'not_identified');
           case _Rejected():
             throw SequenzyException('The identity token was rejected', 'identity_rejected');
           case _Failed(:final error):
@@ -919,15 +1204,59 @@ class SequenzyClient {
         }
       });
 
+  /// Placement keys one request can ask for.
+  static const maxPlacementsPerRequest = 10;
+
+  /// What each placement shows the identified contact: the highest-priority
+  /// open item per key, or null when the slot should collapse. Up to 10 keys.
+  Future<Map<String, InAppMessage?>> fetchPlacements(List<String> placements) => _run(() async {
+        final keys = <String>[
+          for (final key in {...placements.map((key) => key.trim())})
+            if (key.isNotEmpty) key,
+        ].take(maxPlacementsPerRequest).toList();
+        if (keys.isEmpty) return <String, InAppMessage?>{};
+        final result = await _withIdentity((identity, token) => _post('/api/v1/in-app/feed/placements', {
+              'companyId': config.companyId,
+              'publicKey': config.publicKey,
+              ...identity,
+              'identityToken': token,
+              'placements': keys,
+              if (config.pushPermission != null) 'actions': [InAppButton.requestPushPermissionAction],
+            }));
+        switch (result) {
+          case _NotIdentified():
+            throw SequenzyException('Call identify or identifyUser with an identity token first', 'not_identified');
+          case _Rejected():
+            throw SequenzyException('The identity token was rejected', 'identity_rejected');
+          case _Failed(:final error):
+            throw error;
+          case _IdentifiedResponse(:final response):
+            if (!response.ok) {
+              throw SequenzyException('HTTP ${response.status} ${_error(response)}'.trim(), 'http', response.status);
+            }
+            final items = <String, InAppMessage?>{for (final key in keys) key: null};
+            final entries = response.body?['placements'];
+            if (entries is List) {
+              for (final entry in entries) {
+                if (entry is! Map) continue;
+                final placement = entry['placement'];
+                if (placement is! String || !items.containsKey(placement)) continue;
+                items[placement] = InAppMessage.fromJson(entry['message']);
+              }
+            }
+            return items;
+        }
+      });
+
   // region Geofences
 
   /// The nearest active geofences around a position, rounded to two decimals
   /// here whatever the caller passes.
   Future<NearbyGeofences> fetchNearbyGeofences(double latitude, double longitude, int limit) => _run(() async {
-        final result = await _withIdentity((email, token) => _post('/api/v1/geofences/nearby', {
+        final result = await _withIdentity((identity, token) => _post('/api/v1/geofences/nearby', {
               'companyId': config.companyId,
               'publicKey': config.publicKey,
-              'email': email,
+              ...identity,
               'identityToken': token,
               'latitude': Geofencing.roundCoordinate(latitude),
               'longitude': Geofencing.roundCoordinate(longitude),
@@ -935,7 +1264,7 @@ class SequenzyClient {
             }));
         switch (result) {
           case _NotIdentified():
-            throw SequenzyException('Call identify(email, identityToken: ...) first', 'not_identified');
+            throw SequenzyException('Call identify or identifyUser with an identity token first', 'not_identified');
           case _Rejected():
             throw SequenzyException('The identity token was rejected', 'identity_rejected');
           case _Failed(:final error):
@@ -948,18 +1277,19 @@ class SequenzyClient {
         }
       });
 
-  /// The signed-in email and its identity token, for native code that
-  /// reports while Dart is not running (the geofence plugins). Asks the
+  /// The signed-in user's identifiers and identity token, for native code
+  /// that reports while Dart is not running (the geofence plugins). Asks the
   /// identity token provider when no token is stored or [refresh] is set.
-  Future<({String email, String identityToken})?> identityCredentials({bool refresh = false}) => _run(() async {
-        final email = _email;
-        if (email == null) return null;
+  /// `email` is null for a user identified by external ID only.
+  Future<({String? email, String? externalId, String identityToken})?> identityCredentials({bool refresh = false}) =>
+      _run(() async {
+        if (_identityKey == null) return null;
         var token = _identityToken;
         if (token == null || refresh) {
-          token = await _tokenFromProvider(email) ?? (refresh ? token : null);
+          token = await _tokenFromProvider() ?? (refresh ? token : null);
         }
         if (token == null) return null;
-        return (email: email, identityToken: token);
+        return (email: _email, externalId: _externalId, identityToken: token);
       });
 
   /// Queues an enter or exit the OS reported. The refresh region and a repeat
@@ -970,7 +1300,7 @@ class SequenzyClient {
         final id = geofenceId.trim();
         if (id.isEmpty || id == GeofenceRegion.refreshRegionId) return false;
         // Visits belong to a contact; never queue one for whoever signs in next.
-        if (_email == null) return false;
+        if (_identityKey == null) return false;
         final occurredAt = (at ?? _now()).toUtc();
         final recent = <String, int>{};
         final stored = _decodeObject(await _store.getString('geofenceTransitions'));
@@ -1010,10 +1340,10 @@ class SequenzyClient {
     PushPermissionStatus? pushPermission,
   }) =>
       _run(() async {
-        final result = await _withIdentity((email, token) => _post('/api/v1/in-app/feed/events', {
+        final result = await _withIdentity((identity, token) => _post('/api/v1/in-app/feed/events', {
               'companyId': config.companyId,
               'publicKey': config.publicKey,
-              'email': email,
+              ...identity,
               'identityToken': token,
               'messageId': messageId,
               'type': type.name,
@@ -1030,24 +1360,25 @@ class SequenzyClient {
 
   // region Identity tokens and HTTP
 
-  Future<_Identified> _withIdentity(Future<_Response> Function(String email, String token) operation) async {
-    final email = _email;
-    if (email == null || _identityBlocked) return _NotIdentified();
+  Future<_Identified> _withIdentity(
+      Future<_Response> Function(Map<String, Object?> identity, String token) operation) async {
+    if (_identityKey == null || _identityBlocked) return _NotIdentified();
+    final identity = _identityFields;
     var usedProvider = false;
     var token = _identityToken;
     if (token == null) {
-      token = await _tokenFromProvider(email);
+      token = await _tokenFromProvider();
       usedProvider = true;
     }
     if (token == null) {
       _log(SequenzyLogLevel.info,
-          'No identity token yet; call identify(email, identityToken: ...) or set identityTokenProvider');
+          'No identity token yet; pass one to identify or identifyUser, or set an identity token provider');
       return _NotIdentified();
     }
     while (true) {
       final _Response response;
       try {
-        response = await operation(email, token!);
+        response = await operation(identity, token!);
       } catch (error) {
         return _Failed(error);
       }
@@ -1058,28 +1389,41 @@ class SequenzyClient {
       await _store.setString('identityToken', null);
       if (!usedProvider) {
         usedProvider = true;
-        final fresh = await _tokenFromProvider(email);
+        final fresh = await _tokenFromProvider();
         if (fresh != null) {
           token = fresh;
           continue;
         }
       }
       _identityBlocked = true;
-      _log(SequenzyLogLevel.error, 'The identity token was rejected; call identify with a fresh token');
+      _log(SequenzyLogLevel.error, 'The identity token was rejected; call identify or identifyUser with a fresh token');
       return _Rejected();
     }
   }
 
-  Future<String?> _tokenFromProvider(String email) async {
-    final provider = identityTokenProvider;
-    if (provider == null) return null;
+  /// A fresh token for the current identity: from [userIdentityTokenProvider]
+  /// for a user identified by external ID, otherwise from
+  /// [identityTokenProvider] with the email.
+  Future<String?> _tokenFromProvider() async {
+    final key = _identityKey;
+    final email = _email;
+    final externalId = _externalId;
+    Future<String> Function()? request;
+    if (externalId != null) {
+      final provider = userIdentityTokenProvider;
+      if (provider != null) request = () => provider(externalId, email);
+    } else if (email != null) {
+      final provider = identityTokenProvider;
+      if (provider != null) request = () => provider(email);
+    }
+    if (request == null) return null;
     final retryAt = _providerRetryAt;
     if (retryAt != null && _now().isBefore(retryAt)) return null;
     try {
       // Calls are serialized, so a provider that never completes (or awaits a
       // Sequenzy call) would stall every later call without the timeout.
-      final token = await provider(email).timeout(_requestTimeout);
-      if (token.isEmpty || _email != email) return null;
+      final token = await request().timeout(_requestTimeout);
+      if (token.isEmpty || _identityKey != key) return null;
       _identityToken = token;
       await _store.setString('identityToken', token);
       return token;

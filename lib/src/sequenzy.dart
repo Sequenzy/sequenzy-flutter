@@ -4,6 +4,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'client.dart';
 import 'geofences.dart';
+import 'live_updates.dart';
 import 'models.dart';
 import 'storage.dart';
 
@@ -62,6 +63,19 @@ class Sequenzy {
     return identified;
   }
 
+  /// Links this installation to the contact with your own user ID, for users
+  /// without an email. Pass [email] too when you have it; the identity token
+  /// must be minted for exactly these identifiers. Returns false (and logs
+  /// why) when the ID or email is not valid.
+  static Future<bool> identifyUser(String externalId, {String? email, String? identityToken}) async {
+    final client = _require();
+    await client.identifyUser(externalId, email: email, identityToken: identityToken);
+    final expectedEmail = email == null || email.trim().isEmpty ? null : email.trim().toLowerCase();
+    final identified = await client.externalId() == externalId.trim() && await client.email() == expectedEmail;
+    if (identified) _events.add(SequenzyIdentityEvent.identified);
+    return identified;
+  }
+
   static Future<void> reset() async {
     await _require().reset();
     _events.add(SequenzyIdentityEvent.reset);
@@ -107,6 +121,43 @@ class Sequenzy {
   /// Call when an activity ends or is dismissed, with its update token.
   static Future<void> liveActivityEnded(String token) => _require().liveActivityEnded(token);
 
+  /// Android Live Updates: reports this device can start activities of
+  /// [activityType] (the same name as your iOS ActivityAttributes type, so one
+  /// backend call reaches both). Call at launch for each type you draw.
+  static Future<void> observeLiveUpdates(String activityType) => _require().observeLiveUpdates(activityType);
+
+  /// Android Live Updates: pass `RemoteMessage.data` from firebase_messaging's
+  /// `onMessage` and `onBackgroundMessage`. Returns what to show (post or
+  /// update the notification for `activityId`), or null for other messages.
+  static Future<LiveUpdateDecision?> handleLiveUpdate(Map<dynamic, dynamic> data, {bool canShow = true}) =>
+      _require().handleLiveUpdate(data, canShow: canShow);
+
+  /// Android Live Updates: starts an activity from the app; your backend
+  /// updates and ends it by [activityId].
+  static Future<LiveUpdateDecision> startLiveUpdate({
+    required String activityType,
+    required String activityId,
+    Map<String, Object?> attributes = const {},
+    Map<String, Object?> contentState = const {},
+  }) =>
+      _require().startLiveUpdate(
+          activityType: activityType, activityId: activityId, attributes: attributes, contentState: contentState);
+
+  /// Android Live Updates: updates a running activity from the app.
+  static Future<LiveUpdateDecision> updateLiveUpdate(String activityId, Map<String, Object?> contentState) =>
+      _require().updateLiveUpdate(activityId, contentState);
+
+  /// Android Live Updates: ends a running activity from the app.
+  static Future<LiveUpdateDecision> endLiveUpdate(String activityId,
+          {Map<String, Object?>? contentState, DateTime? dismissAt}) =>
+      _require().endLiveUpdate(activityId, contentState: contentState, dismissAt: dismissAt);
+
+  /// Android Live Updates: call when the person swipes one away.
+  static Future<void> liveUpdateDismissed(String activityId) => _require().liveUpdateDismissed(activityId);
+
+  /// Android Live Updates this device shows now.
+  static Future<List<LiveUpdateActivity>> liveUpdates() => _require().liveUpdates();
+
   /// Call when the user opens a notification (`FirebaseMessaging.onMessageOpenedApp`,
   /// `getInitialMessage`) with `message.data`. Reports the click and opens the push URL.
   /// Returns false for other senders.
@@ -126,9 +177,13 @@ class Sequenzy {
     return true;
   }
 
-  /// The signed-in contact, or null. Geofence plugins only watch places for
-  /// identified contacts.
+  /// The signed-in contact's email, or null (also for a user identified by
+  /// external ID only).
   static Future<String?> identifiedEmail() => _require().email();
+
+  /// One string per signed-in contact (the external ID or the email), or
+  /// null while anonymous. Geofence plugins only watch places while it is set.
+  static Future<String?> identifiedContact() => _require().contactKey();
 
   /// The nearest active geofences around a position. Usually called by the
   /// `sequenzy_flutter_geofences` plugin rather than the app.
@@ -148,6 +203,11 @@ class Sequenzy {
       );
 
   static Future<List<InAppMessage>> fetchCards({int? limit}) => _require().fetchFeed(kind: 'card', limit: limit);
+
+  /// What each placement shows the identified contact (null: collapse the
+  /// slot). [SequenzyPlacement] calls this for you.
+  static Future<Map<String, InAppMessage?>> fetchPlacements(List<String> placements) =>
+      _require().fetchPlacements(placements);
 
   static Future<bool> report(InAppEventType type, InAppMessage message, {String? buttonId}) =>
       _require().report(type, message.id, buttonId: buttonId);

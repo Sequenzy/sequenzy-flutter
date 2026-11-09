@@ -139,11 +139,11 @@ class _SequenzyInAppHostState extends State<SequenzyInAppHost> with WidgetsBindi
     if (!force && _lastFetch != null && now.difference(_lastFetch!) < widget.refreshInterval * 0.9) return;
     _lastFetch = now;
     // Another contact signed in: the previous one's messages go.
-    final email = await client.email();
+    final owner = await client.contactKey();
     if (!mounted) return;
-    if (email != _owner) {
+    if (owner != _owner) {
       _clearMessages();
-      _owner = email;
+      _owner = owner;
     }
     final List<InAppMessage> messages;
     try {
@@ -151,7 +151,7 @@ class _SequenzyInAppHostState extends State<SequenzyInAppHost> with WidgetsBindi
     } catch (_) {
       return;
     }
-    if (!mounted || await client.email() != email) return;
+    if (!mounted || await client.contactKey() != owner) return;
     for (final message in messages) {
       if (message.isCard || _shown.contains(message.id) || _current?.id == message.id) continue;
       if (message.resolvedFormat == 'html' && (!widget.showHtmlMessages || message.html == null)) continue;
@@ -188,7 +188,7 @@ class _SequenzyInAppHostState extends State<SequenzyInAppHost> with WidgetsBindi
   /// signed in; otherwise closes it, unreported.
   void _forOwner(InAppMessage message, String? owner, void Function() action) {
     unawaited(() async {
-      if (await Sequenzy.client?.email() != owner) {
+      if (await Sequenzy.client?.contactKey() != owner) {
         if (mounted && _current?.id == message.id) _close();
         return;
       }

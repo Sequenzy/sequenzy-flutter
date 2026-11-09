@@ -42,7 +42,8 @@ public class SequenzyFlutterGeofencesPlugin: NSObject, FlutterPlugin {
         case "setIdentity":
             result(
                 bridge.setIdentity(
-                    email: arguments["email"] as? String, identityToken: arguments["identityToken"] as? String))
+                    email: arguments["email"] as? String, identityToken: arguments["identityToken"] as? String,
+                    externalId: arguments["externalId"] as? String))
         case "authorization":
             result(bridge.authorization)
         case "requestAuthorization":

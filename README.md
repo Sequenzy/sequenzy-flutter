@@ -10,13 +10,14 @@ Full guide: [Mobile SDKs](https://docs.sequenzy.com/concepts/mobile-sdks).
 
 ```yaml
 dependencies:
-  sequenzy_flutter: ^0.1.0
+  sequenzy_flutter: ^0.3.0
 ```
 
 ## Use
 
 ```dart
 import 'package:sequenzy_flutter/sequenzy_flutter.dart';
+import 'package:flutter_timezone/flutter_timezone.dart';
 
 Sequenzy.configure(SequenzyConfig(
   publicKey: 'seq_pk_...',            // key with your app IDs under Allowed app IDs
@@ -24,6 +25,9 @@ Sequenzy.configure(SequenzyConfig(
   appId: 'com.example.app',
   platform: Platform.isIOS ? 'ios' : 'android',
   identityTokenProvider: (email) => myBackend.sequenzyToken(email),
+  // Optional: the IANA timezone (for example from flutter_timezone), so push
+  // campaigns can deliver in each contact's local time.
+  timezone: (await FlutterTimezone.getLocalTimezone()).identifier,
   // Optional: lets Sequenzy see who allows notifications and show push
   // primers (in-app messages that ask).
   pushPermission: SequenzyPushPermission(
@@ -38,6 +42,7 @@ Sequenzy.configure(SequenzyConfig(
 MaterialApp(builder: (context, child) => SequenzyInAppHost(child: child!), home: ...);
 
 await Sequenzy.identify(user.email);           // after sign-in; false for an invalid email
+await Sequenzy.identifyUser(user.id);          // or by your user ID, for users without an email
 Sequenzy.track('workout_completed', {'minutes': 30});
 // iOS needs the APNs device token (Sequenzy sends through APNs), Android the FCM token.
 final pushToken = Platform.isIOS
@@ -65,6 +70,38 @@ await Sequenzy.liveActivityEnded(token);       // when the activity ends or is d
 
 On sign-out, end your running activities in native code before
 `Sequenzy.reset()`, so the next person never sees them.
+
+Android Live Updates take the same backend calls. The SDK keeps their state
+and tokens; your notification plugin (for example flutter_local_notifications)
+draws them:
+
+```dart
+await Sequenzy.observeLiveUpdates('DeliveryAttributes'); // at launch, on Android
+// in FirebaseMessaging.onMessage and onBackgroundMessage (the background
+// handler runs in its own isolate: call Sequenzy.configure there first):
+final decision = await Sequenzy.handleLiveUpdate(message.data, canShow: notificationsAllowed);
+if (decision != null && decision.shouldShow) {
+  // post or update the notification for decision.activity!.activityId:
+  // ongoing until activity.isEnded, removed at decision.dismissAt
+}
+await Sequenzy.liveUpdateDismissed(activityId); // when it is swiped away
+```
+
+`startLiveUpdate`, `updateLiveUpdate` and `endLiveUpdate` change one from the
+app, and `onLiveUpdatesRemoved` in `SequenzyConfig` lists the notifications to
+cancel after sign-out.
+
+## Placements
+
+Show in-app content inline, in a slot of your own layout, for a
+[placement](https://docs.sequenzy.com/concepts/in-app-placements) defined in Sequenzy. The widget builds
+nothing while the contact has nothing to show.
+
+```dart
+const SequenzyPlacement(placementId: 'home_hero');
+// Or draw it yourself:
+SequenzyPlacement(placementId: 'home_hero', builder: (context, item, placements) => MyHero(item));
+```
 
 ## Geofencing
 
@@ -109,3 +146,11 @@ sources with every release.
   and [in-app messages](https://docs.sequenzy.com/concepts/in-app-messages)
 - [Pricing](https://sequenzy.com/pricing)
 - Other Sequenzy SDKs: [iOS](https://github.com/Sequenzy/sequenzy-swift), [Android](https://github.com/Sequenzy/sequenzy-android), [React Native](https://github.com/Sequenzy/sequenzy-react-native)
+
+## Users without an email
+
+For users who sign in without an email (a hidden Apple address, phone login),
+mint the identity token for your user ID as `externalId` and call
+`identifyUser` with the same ID (and the email, when you minted with it). Set
+`userIdentityTokenProvider` to renew these tokens. See
+[Users without an email](https://docs.sequenzy.com/concepts/mobile-sdks#users-without-an-email).

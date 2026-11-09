@@ -50,7 +50,12 @@ class Harness {
     return http.Response('{"success":true}', 200);
   });
 
-  SequenzyClient make({IdentityTokenProvider? provider, String platform = 'ios', SequenzyPushPermission? pushPermission}) {
+  SequenzyClient make({
+    IdentityTokenProvider? provider,
+    UserIdentityTokenProvider? userProvider,
+    String platform = 'ios',
+    SequenzyPushPermission? pushPermission,
+  }) {
     final config = contract['config'] as Map<String, dynamic>;
     return SequenzyClient(
       SequenzyConfig(
@@ -60,6 +65,7 @@ class Harness {
         apiBaseUrl: config['apiBaseUrl'] as String,
         platform: platform,
         identityTokenProvider: provider,
+        userIdentityTokenProvider: userProvider,
         logLevel: SequenzyLogLevel.none,
         appVersion: '1.0',
         osVersion: '18.0',
@@ -236,6 +242,24 @@ void main() {
         }
       ]);
       expect(await client.queuedEventCount(), 0);
+    });
+
+    test('fetches placements and reports their display', () async {
+      harness.respondTo('/api/v1/in-app/feed/placements', 200, jsonDecode(fixture('placements-response.json')) as Object);
+      final client = harness.make();
+      await client.identify(email, identityToken: identityToken);
+      final placements = await client.fetchPlacements(['home_hero', 'checkout_upsell', 'home_hero']);
+      expectContract(harness.to('/api/v1/in-app/feed/placements').last, 'fetchPlacements');
+      final hero = placements['home_hero']!;
+      expect(hero.id, 'iam_placement');
+      expect(hero.isPlacement, isTrue);
+      expect(hero.placement, 'home_hero');
+      expect(placements.containsKey('checkout_upsell'), isTrue);
+      expect(placements['checkout_upsell'], isNull);
+      expect(await client.fetchPlacements([' ']), isEmpty);
+
+      expect(await client.report(InAppEventType.displayed, 'iam_placement'), isTrue);
+      expectContract(harness.requests.last, 'reportPlacementDisplayed');
     });
 
     test('fetches the feed and reports in-app events', () async {
@@ -798,10 +822,10 @@ void main() {
       final client = harness.make(provider: (email) async => 'seq_wid_fresh.${++calls}');
       expect(await client.identityCredentials(), isNull);
       await client.identify(email, identityToken: identityToken);
-      expect(await client.identityCredentials(), (email: email, identityToken: identityToken));
+      expect(await client.identityCredentials(), (email: email, externalId: null, identityToken: identityToken));
       expect(calls, 0);
-      expect(await client.identityCredentials(refresh: true), (email: email, identityToken: 'seq_wid_fresh.1'));
-      expect(await client.identityCredentials(), (email: email, identityToken: 'seq_wid_fresh.1'));
+      expect(await client.identityCredentials(refresh: true), (email: email, externalId: null, identityToken: 'seq_wid_fresh.1'));
+      expect(await client.identityCredentials(), (email: email, externalId: null, identityToken: 'seq_wid_fresh.1'));
       await client.reset();
       expect(await client.identityCredentials(), isNull);
     });
@@ -827,6 +851,87 @@ void main() {
       expect(GeofenceRegion.fromJson(planned.first.toJson()), planned.first);
     });
   });
+
+  group('identifyUser (external ID)', () {
+    late Harness harness;
+    setUp(() => harness = Harness());
+
+    test('sends the external ID, without an email, on identified requests', () async {
+      final client = harness.make();
+      await client.track('opened');
+      await client.identifyUser(' user_123 ', identityToken: identityToken);
+      await client.flush();
+      final batch = harness.to('/api/v1/app-events').first;
+      expect(batch.body['externalId'], 'user_123');
+      expect(batch.body.containsKey('email'), isFalse);
+      expect(batch.body['identityToken'], identityToken);
+      expect(await client.externalId(), 'user_123');
+      expect(await client.email(), isNull);
+      expect(await client.contactKey(), 'external user_123');
+    });
+
+    test('sends both identifiers when the user has an email', () async {
+      final client = harness.make();
+      await client.identifyUser('user_123', email: 'Jane@Example.com', identityToken: identityToken);
+      await client.setProfile(const ProfileUpdate(firstName: 'Jane'));
+      final profile = harness.to('/api/v1/app-attributes').first;
+      expect(profile.body['externalId'], 'user_123');
+      expect(profile.body['email'], 'jane@example.com');
+    });
+
+    test('asks the user token provider, never the email one, for external IDs', () async {
+      var emailCalls = 0;
+      final userCalls = <String>[];
+      final client = harness.make(
+        provider: (email) async {
+          emailCalls++;
+          return 'seq_wid_email.token';
+        },
+        userProvider: (externalId, email) async {
+          userCalls.add('$externalId|$email');
+          return 'seq_wid_user.$externalId';
+        },
+      );
+      await client.identifyUser('user_123');
+      await client.track('opened');
+      await client.flush();
+      expect(userCalls, ['user_123|null']);
+      expect(emailCalls, 0);
+      expect(harness.to('/api/v1/app-events').first.body['identityToken'], 'seq_wid_user.user_123');
+    });
+
+    test("drops the previous user's queue when another user ID signs in", () async {
+      final client = harness.make();
+      await client.identifyUser('user_1');
+      await client.track('for_user_1');
+      expect(await client.queuedEventCount(), 1);
+      await client.identifyUser('user_2', identityToken: identityToken);
+      expect(await client.queuedEventCount(), 0);
+    });
+
+    test('forgets a stored token when the identifiers change for the same user', () async {
+      final client = harness.make();
+      await client.identifyUser('user_1', identityToken: 'seq_wid_old.1');
+      await client.identifyUser('user_1', email: 'jane@example.com');
+      expect(await client.identityCredentials(), isNull);
+    });
+
+    test('rejects an empty or overlong user ID', () async {
+      final client = harness.make();
+      await client.identifyUser('   ', identityToken: identityToken);
+      await client.identifyUser('x' * 256, identityToken: identityToken);
+      expect(await client.externalId(), isNull);
+    });
+
+    test('hands the external ID to native reporters and clears it on reset', () async {
+      final client = harness.make();
+      await client.identifyUser('user_123', identityToken: identityToken);
+      expect(await client.identityCredentials(), (email: null, externalId: 'user_123', identityToken: identityToken));
+      await client.reset();
+      expect(await client.externalId(), isNull);
+      expect(await client.identityCredentials(), isNull);
+    });
+  });
 }
 
 class _FlakyStore implements SequenzyStore {
@@ -845,5 +950,4 @@ class _FlakyStore implements SequenzyStore {
 
   @override
   Future<void> setString(String key, String? value) => inner.setString(key, value);
-
 }

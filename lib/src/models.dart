@@ -15,6 +15,8 @@ class InAppMessage {
     required this.data,
     required this.style,
     required this.pinned,
+    this.placement,
+    this.layout,
     required this.createdAt,
     required this.expiresAt,
     required this.displayedAt,
@@ -26,7 +28,7 @@ class InAppMessage {
 
   final String id;
 
-  /// `message` or `card`.
+  /// `message`, `card`, or `placement` (shown inline by [SequenzyPlacement]).
   final String kind;
 
   /// `modal`, `banner`, `fullscreen` or `html` (a custom HTML message, shown
@@ -48,6 +50,12 @@ class InAppMessage {
   final Map<String, String> data;
   final InAppStyle style;
   final bool pinned;
+
+  /// Placement items: the placement key they fill.
+  final String? placement;
+
+  /// Placement items: `card`, `banner` or `hero` (see [resolvedLayout]).
+  final String? layout;
   final String createdAt;
   final String? expiresAt;
   final String? displayedAt;
@@ -61,9 +69,13 @@ class InAppMessage {
   final bool showCloseButton;
 
   bool get isCard => kind == 'card';
+  bool get isPlacement => kind == 'placement';
   String get resolvedFormat => format ?? 'modal';
   String get resolvedPosition => position ?? 'bottom';
   bool get isRead => readAt != null;
+
+  /// How a placement item is drawn; missing or unknown values are `card`.
+  String get resolvedLayout => layout == 'banner' || layout == 'hero' ? layout! : 'card';
 
   InAppMessage copyWith({String? readAt}) => InAppMessage(
         id: id,
@@ -79,6 +91,8 @@ class InAppMessage {
         data: data,
         style: style,
         pinned: pinned,
+        placement: placement,
+        layout: layout,
         createdAt: createdAt,
         expiresAt: expiresAt,
         displayedAt: displayedAt,
@@ -93,7 +107,7 @@ class InAppMessage {
     if (json is! Map) return null;
     final id = json['id'];
     final kind = json['kind'];
-    if (id is! String || (kind != 'message' && kind != 'card')) return null;
+    if (id is! String || (kind != 'message' && kind != 'card' && kind != 'placement')) return null;
     final data = <String, String>{};
     final rawData = json['data'];
     if (rawData is Map) {
@@ -117,6 +131,8 @@ class InAppMessage {
       data: data,
       style: InAppStyle.fromJson(json['style']),
       pinned: json['pinned'] == true,
+      placement: _string(json['placement']),
+      layout: _string(json['layout']),
       createdAt: _string(json['createdAt']) ?? '',
       expiresAt: _string(json['expiresAt']),
       displayedAt: _string(json['displayedAt']),
